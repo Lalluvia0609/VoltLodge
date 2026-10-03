@@ -1,0 +1,6 @@
+{
+  "name": "VoltLodge - Hotel EV Charging & Bay Turnover Manager",
+  "description": "Smart EV charging allocation and bay turnover management system for motels and hotels during peak hours.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
