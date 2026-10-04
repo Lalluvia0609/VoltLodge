@@ -1,79 +1,768 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
-import {
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
+import type {
   Bay,
   ChargingSession,
   SystemEvent,
   HistoryRecord,
   AllocationAlgorithm,
   VehicleRequestInput,
-  ValetTask,
-  ExtensionRequest,
 } from '../types';
 import {
   ALL_PRESETS,
   PRESET_1_POWER_CRUNCH,
-  SimulationPreset,
+  type SimulationPreset,
 } from '../data/presets';
 import {
+  advanceEngine,
   calculatePowerAllocation,
-  estimateChargingFeasibility,
+  syncBays,
+  reserveQueue,
+  predictCharging,
+  validateSchedule,
+  remainingEnergy,
+  type EngineState,
+  type ChargingPrediction,
 } from '../utils/allocation';
-import {
-  addMinutesToIso,
-  getMinutesDiff,
-  createIsoWithTime,
-} from '../utils/time';
+import { addMinutesToIso, formatDateTime, getMinutesDiff } from '../utils/time';
 
-interface SimulationContextType {
-  // Clock & Playback
-  currentTimeIso: string;
-  isPlaying: boolean;
-  playbackSpeed: number; // multiplier
-  togglePlay: () => void;
-  setSpeed: (speed: number) => void;
-  stepMinutes: (mins: number) => void;
-  resetSimulation: () => void;
-  loadPreset: (presetId: string) => void;
-  activePresetId: string;
-  allPresets: SimulationPreset[];
-
-  // Site Configuration
-  sitePowerBudgetKw: number;
-  setSitePowerBudgetKw: (kw: number) => void;
-  activeAlgorithm: AllocationAlgorithm;
-  setActiveAlgorithm: (algo: AllocationAlgorithm) => void;
-  chargerMaxKw: number;
-  totalAllocatedPowerKw: number;
-  availableStandardStalls: number;
-  staffOnDuty: string[];
-  idleGracePeriodMins: number;
-  idleFeePerMin: number;
-
-  // State Entities
-  bays: Bay[];
-  sessions: ChargingSession[];
-  activeSession: ChargingSession | null;
-  activeRequestId: string | null;
-  setActiveRequestId: (id: string | null) => void;
-  systemEvents: SystemEvent[];
+type Result = { success: boolean; requestId?: string; error?: string };
+const success: Result = { success: true };
+const failure = (error: string): Result => ({ success: false, error });
+const time = (value: string) => Date.parse(value);
+interface DeskState extends EngineState {
   historyRecords: HistoryRecord[];
+  systemEvents: SystemEvent[];
+}
+function initialState(preset: SimulationPreset): DeskState {
+  const sessions = structuredClone(preset.sessions).map((s) => ({
+    ...s,
+    arrivalTime: new Date(s.arrivalTime).toISOString(),
+    useByTime: new Date(s.useByTime).toISOString(),
+    agreedMoveByTime: new Date(s.agreedMoveByTime).toISOString(),
+    targetPercent:
+      s.initialSocPercent + (s.targetKwh / s.batteryCapacityKwh) * 100,
+    originalLatestFinishTime: new Date(
+      Math.min(time(s.plannedLatestFinishTime), time(s.useByTime)),
+    ).toISOString(),
+    chargingDeadline: new Date(
+      Math.min(time(s.plannedLatestFinishTime), time(s.useByTime)),
+    ).toISOString(),
+    completionWindowStart: new Date(s.estimatedFinishTime).toISOString(),
+    completionWindowEnd: new Date(s.plannedLatestFinishTime).toISOString(),
+    moveReportedAt: null,
+    ...(time(s.arrivalTime) > time(preset.simulationStartIso)
+      ? { status: 'waiting_bay' as const, bayId: null, allocatedKw: 0 }
+      : {}),
+  }));
+  const bays: Bay[] = Array.from({ length: preset.bayCount }, (_, i) => ({
+    bayId: `bay-${i + 1}`,
+    bayNumber: i + 1,
+    name: `Bay ${i + 1}`,
+    maxKw: preset.chargerMaxKw,
+    currentStatus: 'vacant',
+    currentVehicleId: null,
+    currentRequestId: null,
+    allocatedKw: 0,
+  }));
+  return {
+    sessions,
+    bays: syncBays(sessions, bays),
+    currentTimeIso: new Date(preset.simulationStartIso).toISOString(),
+    historyRecords: [],
+    systemEvents: [],
+  };
+}
+function event(
+  state: DeskState,
+  message: string,
+  category: SystemEvent['category'] = 'charging',
+  type: SystemEvent['type'] = 'info',
+  session?: ChargingSession,
+) {
+  state.systemEvents = [
+    {
+      id: crypto.randomUUID(),
+      timestamp: state.currentTimeIso,
+      message,
+      category,
+      type,
+      requestId: session?.requestId,
+      vehicleId: session?.vehicleId,
+    },
+    ...state.systemEvents,
+  ].slice(0, 80);
+}
 
-  // Role Switcher
-  userRole: 'guest' | 'frontdesk' | 'simulation';
-  setUserRole: (role: 'guest' | 'frontdesk' | 'simulation') => void;
+function useSimulationState() {
+  const [activePresetId, setActivePresetId] = useState(
+    PRESET_1_POWER_CRUNCH.id,
+  );
+  const [state, setState] = useState(() => initialState(PRESET_1_POWER_CRUNCH));
+  const stateRef = useRef(state);
+  const [sitePowerBudgetKw, setBudget] = useState(
+    PRESET_1_POWER_CRUNCH.sitePowerBudgetKw,
+  );
+  const budgetRef = useRef(sitePowerBudgetKw);
+  const [activeAlgorithm, setAlgorithm] =
+    useState<AllocationAlgorithm>('demand_urgency');
+  const algorithmRef = useRef(activeAlgorithm);
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(
+    state.sessions[0]?.requestId || null,
+  );
+  const [userRole, setUserRole] = useState<
+    'guest' | 'frontdesk' | 'simulation'
+  >('guest');
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(5);
+  const [extensionLimitMinutes, setExtensionLimitMinutes] = useState(60);
+  const staffOnDuty = [
+    'Alex Turner (Front Desk)',
+    'Jordan Miller (Duty Manager)',
+    'Sam Vance (Night Attendant)',
+  ];
+  const idleGracePeriodMins = 15,
+    idleFeePerMin = 0.5;
+  const refresh = useCallback((draft: DeskState) => {
+    draft.bays = syncBays(draft.sessions, draft.bays);
+    const powers = calculatePowerAllocation(
+      draft.sessions,
+      draft.bays,
+      budgetRef.current,
+      algorithmRef.current,
+      draft.currentTimeIso,
+    );
+    draft.sessions.forEach((s) => {
+      s.allocatedKw = powers.get(s.requestId) || 0;
+      if (s.status === 'charging' || s.status === 'paused')
+        s.status = s.allocatedKw > 0 ? 'charging' : 'paused';
+    });
+    draft.bays = syncBays(draft.sessions, draft.bays);
+    stateRef.current = draft;
+    setState(draft);
+  }, []);
+  const change = useCallback(
+    (fn: (draft: DeskState) => void) => {
+      const draft = structuredClone(stateRef.current);
+      fn(draft);
+      refresh(draft);
+    },
+    [refresh],
+  );
+  const loadPreset = useCallback(
+    (id: string) => {
+      const preset = ALL_PRESETS.find((p) => p.id === id);
+      if (!preset) return;
+      setIsPlaying(false);
+      setActivePresetId(id);
+      budgetRef.current = preset.sitePowerBudgetKw;
+      setBudget(preset.sitePowerBudgetKw);
+      const draft = initialState(preset);
+      event(draft, `Loaded ${preset.name}`, 'power');
+      refresh(draft);
+      setActiveRequestId(draft.sessions[0]?.requestId || null);
+    },
+    [refresh],
+  );
+  const resetSimulation = () => loadPreset(activePresetId);
+  useEffect(() => {
+    refresh(structuredClone(stateRef.current));
+  }, [refresh]);
+  const stepMinutes = useCallback(
+    (minutes: number) => {
+      if (!Number.isFinite(minutes) || minutes <= 0) return;
+      const previous = stateRef.current;
+      const advanced = advanceEngine(
+        previous,
+        minutes,
+        budgetRef.current,
+        algorithmRef.current,
+      );
+      const draft = { ...previous, ...advanced };
+      draft.sessions.forEach((s) => {
+        const old = previous.sessions.find((o) => o.requestId === s.requestId);
+        if (s.targetReachedAt && !old?.targetReachedAt)
+          event(
+            draft,
+            `Target reached. Please move your car by ${formatDateTime(s.agreedMoveByTime)}.`,
+            'charging',
+            'success',
+            s,
+          );
+        if (
+          s.status === 'ended_incomplete' &&
+          old?.status !== 'ended_incomplete'
+        )
+          event(
+            draft,
+            `${s.vehicleId}: charging stopped at deadline; ${remainingEnergy(s).toFixed(1)} kWh still needed.`,
+            'charging',
+            'alert',
+            s,
+          );
+        if (s.status === 'waiting_plugin' && old?.status !== 'waiting_plugin')
+          event(
+            draft,
+            `${s.vehicleId}: your bay is reserved. Please park and plug in; staff will confirm.`,
+            'queue',
+            'info',
+            s,
+          );
+      });
+      refresh(draft);
+    },
+    [refresh],
+  );
+  useEffect(() => {
+    if (!isPlaying) return;
+    const timer = setInterval(() => stepMinutes(playbackSpeed), 1000);
+    return () => clearInterval(timer);
+  }, [isPlaying, playbackSpeed, stepMinutes]);
 
-  // Guest Actions (EV01, EV02, EV07, EV11, EV12)
-  submitRequest: (input: VehicleRequestInput) => { success: boolean; requestId?: string; error?: string };
-  confirmPlan: (requestId: string, agreedMoveTime: string, acceptedDeficit?: boolean) => void;
-  requestValetAssistance: (requestId: string, note: string) => void;
-  requestExtension: (requestId: string, newTime: string, reason: string) => void;
-  modifyRequest: (requestId: string, newTargetKwh: number, newUseByTime: string) => { success: boolean; error?: string };
-  cancelRequest: (requestId: string) => void;
-
-  // Front Desk Actions (EV05, EV08, EV09, EV12, EV14)
-  confirmVehicleParkedAndPlugged: (bayId: string, vehicleId: string) => void;
-  reviewValetTask: (
-    taskId: string,
+  const validate = (
+    sessions: ChargingSession[],
+    bays = stateRef.current.bays,
+    budget = budgetRef.current,
+  ) => {
+    if (
+      !validateSchedule(sessions, bays, budget, stateRef.current.currentTimeIso)
+        .feasible
+    )
+      return false;
+    return (
+      algorithmRef.current !== 'equal_sharing' ||
+      sessions
+        .filter(
+          (s) =>
+            !s.bayReleasedAt &&
+            ['charging', 'paused', 'waiting_bay', 'waiting_plugin'].includes(
+              s.status,
+            ) &&
+            remainingEnergy(s) > 1e-7,
+        )
+        .every(
+          (s) =>
+            predictCharging(
+              s,
+              sessions,
+              bays,
+              budget,
+              'equal_sharing',
+              stateRef.current.currentTimeIso,
+            ).feasible,
+        )
+    );
+  };
+  const setSitePowerBudgetKw = (kw: number): Result => {
+    if (!Number.isFinite(kw) || kw < 0)
+      return failure('Enter a non-negative site power limit.');
+    if (!validate(stateRef.current.sessions, stateRef.current.bays, kw))
+      return failure(
+        'This power limit would break an existing charging deadline. Extend the affected plans explicitly first.',
+      );
+    budgetRef.current = kw;
+    setBudget(kw);
+    change((d) => event(d, `Site limit updated to ${kw} kW.`, 'power'));
+    return success;
+  };
+  const setActiveAlgorithm = (algorithm: AllocationAlgorithm): Result => {
+    // Equal sharing is a benchmark option; do not break protected live promises.
+    if (
+      algorithm === 'equal_sharing' &&
+      stateRef.current.sessions.some(
+        (s) =>
+          !s.bayReleasedAt &&
+          ['charging', 'paused', 'waiting_bay', 'waiting_plugin'].includes(
+            s.status,
+          ) &&
+          !predictCharging(
+            s,
+            stateRef.current.sessions,
+            stateRef.current.bays,
+            budgetRef.current,
+            algorithm,
+            stateRef.current.currentTimeIso,
+          ).feasible,
+      )
+    )
+      return failure(
+        'Equal sharing would miss a confirmed deadline. Use the comparison page to test it.',
+      );
+    algorithmRef.current = algorithm;
+    setAlgorithm(algorithm);
+    change(() => {});
+    return success;
+  };
+  const setChargerMaxKw = (kw: number): Result => {
+    if (!Number.isFinite(kw) || kw <= 0)
+      return failure('Charger AC limit must be greater than zero.');
+    const bays = stateRef.current.bays.map((b) => ({ ...b, maxKw: kw }));
+    if (!validate(stateRef.current.sessions, bays))
+      return failure('This charger limit would break a confirmed deadline.');
+    change((d) => {
+      d.bays = bays;
+    });
+    return success;
+  };
+  const submitRequest = (input: VehicleRequestInput): Result => {
+    const {
+      batteryCapacityKwh: capacity,
+      currentPercent: current,
+      targetPercent: target,
+      maxChargeKw: ac,
+    } = input;
+    if (!input.vehicleId.trim())
+      return failure('Enter your vehicle registration.');
+    if (
+      !Number.isFinite(capacity) ||
+      !capacity ||
+      capacity <= 0 ||
+      !Number.isFinite(ac) ||
+      !ac ||
+      ac <= 0
+    )
+      return failure(
+        'Enter valid usable capacity and maximum AC charging power.',
+      );
+    if (
+      !Number.isFinite(current) ||
+      !Number.isFinite(target) ||
+      current! < 0 ||
+      target! > 100 ||
+      target! <= current!
+    )
+      return failure(
+        'Choose a target above your current battery level, up to 100%.',
+      );
+    const now = stateRef.current.currentTimeIso;
+    if (
+      !Number.isFinite(time(input.useByTime)) ||
+      time(input.useByTime) <= time(now)
+    )
+      return failure('Choose a future time when you need your car.');
+    if (
+      stateRef.current.sessions.some(
+        (s) =>
+          s.vehicleId === input.vehicleId.trim().toUpperCase() &&
+          !s.bayReleasedAt &&
+          s.status !== 'pending_confirmation',
+      )
+    )
+      return failure('This vehicle already has an active plan.');
+    const s: ChargingSession = {
+      requestId: crypto.randomUUID(),
+      vehicleId: input.vehicleId.trim().toUpperCase(),
+      guestName: input.guestName.trim() || 'Hotel Guest',
+      roomNumber: input.roomNumber.trim(),
+      batteryCapacityKwh: capacity,
+      initialSocPercent: current!,
+      targetPercent: target!,
+      targetKwh: (capacity * (target! - current!)) / 100,
+      maxChargeKw: ac,
+      arrivalTime: now,
+      useByTime: new Date(input.useByTime).toISOString(),
+      agreedMoveByTime: input.useByTime,
+      moveMethod: input.moveMethod || 'self',
+      estimatedStartTime: now,
+      estimatedFinishTime: '',
+      plannedLatestFinishTime: '',
+      isFeasibleOnTime: false,
+      projectedDeficitKwh: 0,
+      guestAcceptedDeficit: false,
+      status: 'pending_confirmation',
+      bayId: null,
+      deliveredKwh: 0,
+      allocatedKw: 0,
+      pluggedInAt: null,
+      targetReachedAt: null,
+      bayReleasedAt: null,
+      notificationsSent: {
+        fifteenMinWarning: false,
+        targetReached: false,
+        overdueWarning: false,
+      },
+    };
+    // Pending plans never consume power or reserve bays. Generate tentative
+    // full-load bounds and revalidate against the live state at confirmation.
+    const tentative = { ...s, status: 'waiting_bay' as const };
+    const cars = [
+      ...stateRef.current.sessions.filter(
+        (x) => x.status !== 'pending_confirmation',
+      ),
+      tentative,
+    ];
+    const prediction = predictCharging(
+      tentative,
+      cars,
+      stateRef.current.bays,
+      budgetRef.current,
+      algorithmRef.current,
+      now,
+    );
+    s.completionWindowStart = prediction.fastest || '';
+    s.completionWindowEnd = prediction.fullLoad || '';
+    s.estimatedStartTime =
+      prediction.waitMinutes !== null
+        ? addMinutesToIso(now, prediction.waitMinutes)
+        : '';
+    s.estimatedFinishTime = prediction.expected || '';
+    s.plannedLatestFinishTime = prediction.fullLoad || '';
+    s.originalLatestFinishTime = prediction.fullLoad || '';
+    s.chargingDeadline = prediction.fullLoad || '';
+    s.agreedMoveByTime = prediction.fullLoad || input.useByTime;
+    s.isFeasibleOnTime =
+      prediction.feasible &&
+      !!prediction.fullLoad &&
+      time(prediction.fullLoad) <= time(s.useByTime);
+    s.projectedDeficitKwh = prediction.deficitKwh;
+    change((d) => {
+      d.sessions = d.sessions.filter(
+        (x) => x.status !== 'pending_confirmation',
+      );
+      d.sessions.push(s);
+    });
+    setActiveRequestId(s.requestId);
+    return { success: true, requestId: s.requestId };
+  };
+  const confirmPlan = (
+    requestId: string,
+    moveTime: string,
+    _acceptedDeficit = false,
+  ): Result => {
+    const draft = structuredClone(stateRef.current),
+      s = draft.sessions.find((s) => s.requestId === requestId);
+    if (!s || s.status !== 'pending_confirmation')
+      return failure('Generate a new plan first.');
+    if (
+      !s.originalLatestFinishTime ||
+      time(s.originalLatestFinishTime) > time(s.useByTime) ||
+      !Number.isFinite(time(moveTime)) ||
+      time(moveTime) > time(s.useByTime) ||
+      time(moveTime) <= time(draft.currentTimeIso)
+    )
+      return failure('Choose a valid move time before you need your car.');
+    s.agreedMoveByTime = new Date(moveTime).toISOString();
+    s.status = 'waiting_bay';
+    // Check the current queue and all existing promises, not only this car.
+    if (!validate(draft.sessions))
+      return failure(
+        'This plan cannot meet all confirmed deadlines. Choose a later use-by time or a lower target.',
+      );
+    const predicted = predictCharging(
+      s,
+      draft.sessions,
+      draft.bays,
+      budgetRef.current,
+      algorithmRef.current,
+      draft.currentTimeIso,
+    );
+    if (
+      !predicted.expected ||
+      time(predicted.expected) >
+        Math.min(time(moveTime), time(s.chargingDeadline!))
+    )
+      return failure(
+        'We cannot finish before this move time. Choose a later time or lower target.',
+      );
+    reserveQueue(draft.sessions, draft.bays, draft.currentTimeIso);
+    event(
+      draft,
+      s.bayId
+        ? 'Your bay is reserved. Park and plug in, then ask reception to confirm.'
+        : 'Your plan is confirmed. We will invite you when a bay is available.',
+      'queue',
+      'success',
+      s,
+    );
+    refresh(draft);
+    return success;
+  };
+  const confirmVehicleParkedAndPlugged = (
+    bayId: string,
+    vehicleId: string,
+  ): Result => {
+    const draft = structuredClone(stateRef.current),
+      s = draft.sessions.find(
+        (s) =>
+          s.bayId === bayId &&
+          s.vehicleId === vehicleId &&
+          s.status === 'waiting_plugin',
+      );
+    if (!s)
+      return failure('This vehicle does not have a reservation for this bay.');
+    if (!validate(draft.sessions))
+      return failure(
+        'Please revise the plan: the delayed arrival can no longer meet the confirmed deadlines.',
+      );
+    s.status = 'charging';
+    s.pluggedInAt = draft.currentTimeIso;
+    event(draft, `${vehicleId} parked and plugged in.`, 'bay', 'success', s);
+    refresh(draft);
+    return success;
+  };
+  const reportVehicleMoved = (requestId: string) =>
+    change((d) => {
+      const s = d.sessions.find((s) => s.requestId === requestId);
+      if (s?.bayId) {
+        s.moveReportedAt = d.currentTimeIso;
+        s.allocatedKw = 0;
+        if (remainingEnergy(s) > 1e-7) s.status = 'cancelled';
+        event(
+          d,
+          'Move reported. Waiting for reception to confirm the bay is clear.',
+          'bay',
+          'info',
+          s,
+        );
+      }
+    });
+  const release = (draft: DeskState, bayId: string, notes?: string) => {
+    const s = draft.sessions.find((s) => s.bayId === bayId && !s.bayReleasedAt);
+    if (!s) return;
+    s.bayId = null;
+    s.bayReleasedAt = draft.currentTimeIso;
+    s.allocatedKw = 0;
+    s.moveReportedAt = null;
+    if (remainingEnergy(s) > 1e-7 && s.status !== 'cancelled')
+      s.status = 'ended_incomplete';
+    const overstay = Math.max(
+      0,
+      getMinutesDiff(s.agreedMoveByTime, draft.currentTimeIso),
+    );
+    draft.historyRecords.unshift({
+      id: crypto.randomUUID(),
+      requestId: s.requestId,
+      vehicleId: s.vehicleId,
+      guestName: s.guestName,
+      roomNumber: s.roomNumber,
+      arrivalTime: s.arrivalTime,
+      departureTime: draft.currentTimeIso,
+      targetKwh: s.targetKwh,
+      actualDeliveredKwh: s.deliveredKwh,
+      targetAchieved: remainingEnergy(s) < 1e-7,
+      onTimeCompletion:
+        !!s.targetReachedAt &&
+        time(s.targetReachedAt) <=
+          Math.min(time(s.chargingDeadline || s.useByTime), time(s.useByTime)),
+      scheduledMoveTime: s.agreedMoveByTime,
+      actualReleaseTime: draft.currentTimeIso,
+      overstayMinutes: overstay,
+      simulatedFeeCharged:
+        Math.max(0, overstay - idleGracePeriodMins) * idleFeePerMin,
+      valetUsed: s.valetTask?.status === 'completed',
+      notes: notes || 'Bay inspected and released.',
+    });
+    reserveQueue(draft.sessions, draft.bays, draft.currentTimeIso);
+    event(
+      draft,
+      `Bay released. The next waiting vehicle is invited to park; charging waits for plug-in confirmation.`,
+      'bay',
+      'success',
+      s,
+    );
+  };
+  const confirmBayReleased = (bayId: string, notes?: string) =>
+    change((d) => release(d, bayId, notes));
+  const cancelRequest = (id: string) =>
+    change((d) => {
+      const s = d.sessions.find((s) => s.requestId === id);
+      if (s) {
+        s.status = 'cancelled';
+        s.allocatedKw = 0;
+        event(
+          d,
+          'Charging stopped. Your bay remains occupied until reception confirms you have moved.',
+          'charging',
+          'info',
+          s,
+        );
+      }
+    });
+  const modifyRequest = (
+    id: string,
+    targetPercent: number,
+    newUseByTime: string,
+    maxChargeKw?: number,
+    moveTime?: string,
+  ): Result => {
+    const draft = structuredClone(stateRef.current),
+      s = draft.sessions.find((s) => s.requestId === id);
+    if (!s || s.bayReleasedAt) return failure('This charging plan has ended.');
+    const current =
+      s.initialSocPercent + (s.deliveredKwh / s.batteryCapacityKwh) * 100;
+    if (
+      !Number.isFinite(targetPercent) ||
+      targetPercent < current - 1e-7 ||
+      targetPercent > 100
+    )
+      return failure(
+        `Choose a target between ${current.toFixed(1)}% and 100%.`,
+      );
+    if (
+      !Number.isFinite(time(newUseByTime)) ||
+      time(newUseByTime) <= time(draft.currentTimeIso)
+    )
+      return failure('Choose a future use-by time.');
+    if (
+      maxChargeKw !== undefined &&
+      (!Number.isFinite(maxChargeKw) || maxChargeKw <= 0)
+    )
+      return failure('Enter a positive AC charging limit.');
+    s.targetPercent = targetPercent;
+    s.targetKwh =
+      (s.batteryCapacityKwh * (targetPercent - s.initialSocPercent)) / 100;
+    s.useByTime = newUseByTime;
+    s.maxChargeKw = maxChargeKw ?? s.maxChargeKw;
+    if (moveTime) {
+      if (
+        !Number.isFinite(time(moveTime)) ||
+        time(moveTime) <= time(draft.currentTimeIso) ||
+        time(moveTime) > time(newUseByTime)
+      )
+        return failure(
+          'Choose a future move time no later than your use-by time.',
+        );
+      s.agreedMoveByTime = moveTime;
+    }
+    if (remainingEnergy(s) > 1e-7) {
+      s.status = s.bayId
+        ? s.pluggedInAt
+          ? 'charging'
+          : 'waiting_plugin'
+        : 'waiting_bay';
+      s.targetReachedAt = null;
+      s.notificationsSent = {
+        fifteenMinWarning: false,
+        targetReached: false,
+        overdueWarning: false,
+      };
+    } else {
+      s.status = 'target_reached';
+      s.targetReachedAt = s.targetReachedAt || draft.currentTimeIso;
+    }
+    if (!validate(draft.sessions))
+      return failure(
+        'This change would miss a charging deadline. Lower your target or explicitly extend your charging time.',
+      );
+    const prediction = predictCharging(
+      s,
+      draft.sessions,
+      draft.bays,
+      budgetRef.current,
+      algorithmRef.current,
+      draft.currentTimeIso,
+    );
+    if (!prediction.feasible)
+      return failure('This change cannot meet the confirmed schedule.');
+    event(
+      draft,
+      'Charging target updated; all confirmed deadlines remain protected.',
+      'charging',
+      'success',
+      s,
+    );
+    refresh(draft);
+    return success;
+  };
+  const requestExtension = (
+    id: string,
+    newTime: string,
+    reason: string,
+    allowChargingDelay = false,
+  ): Result => {
+    const draft = structuredClone(stateRef.current),
+      s = draft.sessions.find((s) => s.requestId === id);
+    if (!s || !s.originalLatestFinishTime || s.bayReleasedAt)
+      return failure('No active confirmed plan.');
+    const limit = time(
+      addMinutesToIso(s.originalLatestFinishTime, extensionLimitMinutes),
+    );
+    if (
+      !Number.isFinite(time(newTime)) ||
+      time(newTime) > limit ||
+      time(newTime) <= time(draft.currentTimeIso) ||
+      time(newTime) < time(s.agreedMoveByTime)
+    )
+      return failure(
+        `Choose a later time no later than ${formatDateTime(new Date(limit).toISOString())}. The limit is based on your original plan.`,
+      );
+    const old = s.agreedMoveByTime;
+    s.agreedMoveByTime = newTime;
+    if (allowChargingDelay) {
+      s.chargingDeadline = newTime;
+      s.useByTime = new Date(
+        Math.max(time(s.useByTime), time(newTime)),
+      ).toISOString();
+    }
+    if (!validate(draft.sessions))
+      return failure('This extension would break another confirmed plan.');
+    s.extensionRequest = {
+      requestId: id,
+      vehicleId: s.vehicleId,
+      currentDeadline: old,
+      requestedDeadline: newTime,
+      reason,
+      status: 'approved',
+      requestedAt: draft.currentTimeIso,
+      reviewedAt: draft.currentTimeIso,
+      allowChargingDelay,
+    };
+    event(
+      draft,
+      allowChargingDelay
+        ? 'You accepted a later charging deadline. Power may be reduced while still finishing by the new time.'
+        : 'Move time extended. Your charging deadline is unchanged.',
+      'charging',
+      'success',
+      s,
+    );
+    refresh(draft);
+    return success;
+  };
+  const reviewExtensionRequest = (id: string, approved: boolean) =>
+    change((d) => {
+      const s = d.sessions.find((s) => s.requestId === id);
+      if (s?.extensionRequest && !approved)
+        s.extensionRequest.status = 'rejected';
+    });
+  const requestValetAssistance = (id: string, note: string) =>
+    change((d) => {
+      const s = d.sessions.find((s) => s.requestId === id);
+      if (
+        !s?.bayId ||
+        ['accepted', 'pending_review'].includes(s.valetTask?.status || '')
+      )
+        return;
+      s.moveMethod = 'valet';
+      s.valetTask = {
+        taskId: crypto.randomUUID(),
+        requestId: id,
+        vehicleId: s.vehicleId,
+        bayId: s.bayId,
+        requestedAt: d.currentTimeIso,
+        status: 'pending_review',
+        authorizationConfirmed: true,
+        keysHandoverNote: note,
+        keysReceived: false,
+        staffAssigned: null,
+        destinationBay: null,
+      };
+      event(
+        d,
+        'Staff assistance requested. Reception will verify your keys and parking space.',
+        'valet',
+        'info',
+        s,
+      );
+    });
+  const reviewValetTask = (
+    id: string,
     approved: boolean,
     params?: {
       staffAssigned?: string;
@@ -81,986 +770,132 @@ interface SimulationContextType {
       rejectionReason?: string;
       keysReceived?: boolean;
       authorizationConfirmed?: boolean;
-    }
-  ) => void;
-  completeValetTask: (taskId: string) => void;
-  confirmBayReleased: (bayId: string, notes?: string) => void;
-  reviewExtensionRequest: (requestId: string, approved: boolean) => void;
-  dismissEvent: (eventId: string) => void;
-  clearAllEvents: () => void;
-}
-
-const SimulationContext = createContext<SimulationContextType | null>(null);
-
-export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [activePresetId, setActivePresetId] = useState<string>(PRESET_1_POWER_CRUNCH.id);
-  const currentPreset = ALL_PRESETS.find((p) => p.id === activePresetId) || PRESET_1_POWER_CRUNCH;
-
-  // Clock
-  const [currentTimeIso, setCurrentTimeIso] = useState<string>(currentPreset.simulationStartIso);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const [playbackSpeed, setPlaybackSpeed] = useState<number>(5); // default 5x speed for smooth demo
-
-  // Site Configuration
-  const [sitePowerBudgetKw, setSitePowerBudgetKw] = useState<number>(currentPreset.sitePowerBudgetKw);
-  const [activeAlgorithm, setActiveAlgorithm] = useState<AllocationAlgorithm>('demand_urgency');
-  const [chargerMaxKw, setChargerMaxKw] = useState<number>(currentPreset.chargerMaxKw);
-  const [availableStandardStalls, setAvailableStandardStalls] = useState<number>(12);
-  const [staffOnDuty] = useState<string[]>([
-    'Alex Turner (Front Desk)',
-    'Jordan Miller (Duty Manager)',
-    'Sam Vance (Night Attendant)',
-  ]);
-  const [idleGracePeriodMins, setIdleGracePeriodMins] = useState<number>(15);
-  const [idleFeePerMin, setIdleFeePerMin] = useState<number>(0.5); // $0.50 / min
-
-  // Active Role and Vehicle
-  const [userRole, setUserRole] = useState<'guest' | 'frontdesk' | 'simulation'>('guest');
-  const [activeRequestId, setActiveRequestId] = useState<string | null>(
-    currentPreset.sessions[0]?.requestId || null
-  );
-
-  // Entities
-  const [bays, setBays] = useState<Bay[]>(() =>
-    Array.from({ length: currentPreset.bayCount }, (_, i) => ({
-      bayId: `bay-${i + 1}`,
-      bayNumber: i + 1,
-      name: `Bay ${i + 1}`,
-      maxKw: currentPreset.chargerMaxKw,
-      currentStatus: 'vacant',
-      currentVehicleId: null,
-      currentRequestId: null,
-      allocatedKw: 0,
-    }))
-  );
-
-  const [sessions, setSessions] = useState<ChargingSession[]>(() =>
-    JSON.parse(JSON.stringify(currentPreset.sessions))
-  );
-
-  const [systemEvents, setSystemEvents] = useState<SystemEvent[]>([
-    {
-      id: 'evt-init',
-      timestamp: currentPreset.simulationStartIso,
-      type: 'info',
-      category: 'power',
-      message: `System initialized with ${currentPreset.bayCount} bay(s), ${currentPreset.sitePowerBudgetKw} kW site budget.`,
     },
-  ]);
-
-  const [historyRecords, setHistoryRecords] = useState<HistoryRecord[]>([]);
-
-  // Add event helper
-  const addEvent = useCallback((event: Omit<SystemEvent, 'id'>) => {
-    const newEvt: SystemEvent = {
-      ...event,
-      id: `evt-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-    };
-    setSystemEvents((prev) => [newEvt, ...prev].slice(0, 80));
-  }, []);
-
-  // Reset simulation to current preset
-  const resetSimulation = useCallback(() => {
-    setIsPlaying(false);
-    setCurrentTimeIso(currentPreset.simulationStartIso);
-    setSitePowerBudgetKw(currentPreset.sitePowerBudgetKw);
-    setChargerMaxKw(currentPreset.chargerMaxKw);
-
-    const freshSessions: ChargingSession[] = JSON.parse(JSON.stringify(currentPreset.sessions));
-    setSessions(freshSessions);
-
-    const freshBays: Bay[] = Array.from({ length: currentPreset.bayCount }, (_, i) => {
-      const existingOcc = freshSessions.find((s) => s.bayId === `bay-${i + 1}`);
-      return {
-        bayId: `bay-${i + 1}`,
-        bayNumber: i + 1,
-        name: `Bay ${i + 1}`,
-        maxKw: currentPreset.chargerMaxKw,
-        currentStatus: existingOcc ? (existingOcc.status === 'target_reached' ? 'occupied_idle' : 'occupied_charging') : 'vacant',
-        currentVehicleId: existingOcc ? existingOcc.vehicleId : null,
-        currentRequestId: existingOcc ? existingOcc.requestId : null,
-        allocatedKw: existingOcc ? existingOcc.allocatedKw : 0,
+  ) =>
+    change((d) => {
+      const s = d.sessions.find((s) => s.valetTask?.taskId === id);
+      if (!s?.valetTask || s.valetTask.status !== 'pending_review') return;
+      if (
+        approved &&
+        (!params?.keysReceived ||
+          !params.authorizationConfirmed ||
+          !params.destinationBay?.trim() ||
+          !params.staffAssigned)
+      )
+        return;
+      s.valetTask = {
+        ...s.valetTask,
+        ...params,
+        status: approved ? 'accepted' : 'rejected',
       };
     });
-    setBays(freshBays);
-
-    setActiveRequestId(freshSessions[0]?.requestId || null);
-
-    setSystemEvents([
-      {
-        id: `evt-${Date.now()}`,
-        timestamp: currentPreset.simulationStartIso,
-        type: 'info',
-        category: 'power',
-        message: `Reset simulation to "${currentPreset.name}".`,
-      },
-    ]);
-  }, [currentPreset]);
-
-  // Load a new preset
-  const loadPreset = useCallback((presetId: string) => {
-    const preset = ALL_PRESETS.find((p) => p.id === presetId);
-    if (!preset) return;
-    setIsPlaying(false);
-    setActivePresetId(presetId);
-    setCurrentTimeIso(preset.simulationStartIso);
-    setSitePowerBudgetKw(preset.sitePowerBudgetKw);
-    setChargerMaxKw(preset.chargerMaxKw);
-
-    const freshSessions: ChargingSession[] = JSON.parse(JSON.stringify(preset.sessions));
-    setSessions(freshSessions);
-
-    const freshBays: Bay[] = Array.from({ length: preset.bayCount }, (_, i) => {
-      const existingOcc = freshSessions.find((s) => s.bayId === `bay-${i + 1}`);
-      return {
-        bayId: `bay-${i + 1}`,
-        bayNumber: i + 1,
-        name: `Bay ${i + 1}`,
-        maxKw: preset.chargerMaxKw,
-        currentStatus: existingOcc ? (existingOcc.status === 'target_reached' ? 'occupied_idle' : 'occupied_charging') : 'vacant',
-        currentVehicleId: existingOcc ? existingOcc.vehicleId : null,
-        currentRequestId: existingOcc ? existingOcc.requestId : null,
-        allocatedKw: existingOcc ? existingOcc.allocatedKw : 0,
-      };
+  const completeValetTask = (id: string) =>
+    change((d) => {
+      const s = d.sessions.find((s) => s.valetTask?.taskId === id);
+      if (
+        !s?.valetTask ||
+        s.valetTask.status !== 'accepted' ||
+        !s.bayId ||
+        remainingEnergy(s) > 1e-7
+      )
+        return;
+      s.valetTask.status = 'completed';
+      s.valetTask.completedAt = d.currentTimeIso;
+      release(d, s.bayId, 'Staff confirmed vehicle moved to standard parking.');
     });
-    setBays(freshBays);
-    setActiveRequestId(freshSessions[0]?.requestId || null);
-
-    setSystemEvents([
-      {
-        id: `evt-${Date.now()}`,
-        timestamp: preset.simulationStartIso,
-        type: 'info',
-        category: 'power',
-        message: `Loaded preset "${preset.name}".`,
-      },
-    ]);
-  }, []);
-
-  // Synchronize bays with initial sessions on mount / preset load
-  useEffect(() => {
-    // Ensure bays match sessions
-    setBays((prevBays) =>
-      prevBays.map((bay) => {
-        const occSession = sessions.find((s) => s.bayId === bay.bayId);
-        if (occSession) {
-          const status = occSession.status === 'target_reached' ? 'occupied_idle' : 'occupied_charging';
-          return {
-            ...bay,
-            currentStatus: status,
-            currentVehicleId: occSession.vehicleId,
-            currentRequestId: occSession.requestId,
-            allocatedKw: occSession.allocatedKw,
-          };
-        }
-        return bay;
-      })
+  const predictions: Record<string, ChargingPrediction> = {};
+  for (const s of state.sessions) {
+    const candidate =
+      s.status === 'pending_confirmation'
+        ? { ...s, status: 'waiting_bay' as const }
+        : s;
+    const cars = state.sessions.filter(
+      (x) => x.status !== 'pending_confirmation',
     );
-  }, [activePresetId]);
-
-  // Total allocated power
-  const totalAllocatedPowerKw = sessions.reduce((acc, s) => acc + (s.allocatedKw || 0), 0);
-
-  // Active Session object
-  const activeSession = sessions.find((s) => s.requestId === activeRequestId) || null;
-
-  // Core Simulation Step function (advances clock and runs physics & policy)
-  const advanceTimeByMinutes = useCallback((deltaMinutes: number) => {
-    setCurrentTimeIso((prevIso) => {
-      const nextIso = addMinutesToIso(prevIso, deltaMinutes);
-
-      setSessions((prevSessions) => {
-        const nextSessions: ChargingSession[] = JSON.parse(JSON.stringify(prevSessions));
-
-        // 1. Check if any vehicles should plug into reserved bays
-        // 2. Power recalculation
-        const powerMap = calculatePowerAllocation(
-          nextSessions,
-          bays,
-          sitePowerBudgetKw,
-          activeAlgorithm,
-          nextIso
-        );
-
-        // Update each session
-        nextSessions.forEach((s) => {
-          if (s.bayId && (s.status === 'charging' || s.status === 'paused')) {
-            const kw = powerMap.get(s.requestId) || 0;
-            s.allocatedKw = kw;
-            s.status = kw > 0 ? 'charging' : 'paused';
-
-            // Deliver energy: kWh = kW * (deltaMinutes / 60)
-            const deliveredDelta = kw * (deltaMinutes / 60);
-            s.deliveredKwh = Math.min(s.targetKwh, s.deliveredKwh + deliveredDelta);
-
-            // 15-minute warning alert (EV06)
-            if (!s.notificationsSent.fifteenMinWarning && kw > 0) {
-              const remainingKwh = s.targetKwh - s.deliveredKwh;
-              const remainingHours = remainingKwh / kw;
-              const remainingMins = Math.round(remainingHours * 60);
-
-              if (remainingMins <= 15 && remainingMins > 0) {
-                s.notificationsSent.fifteenMinWarning = true;
-                addEvent({
-                  timestamp: nextIso,
-                  requestId: s.requestId,
-                  vehicleId: s.vehicleId,
-                  type: 'warning',
-                  category: 'charging',
-                  message: `15-Min Alert: ${s.vehicleId} estimated to complete target in ~${remainingMins} mins. Please prepare to move by ${s.agreedMoveByTime.slice(11, 16)} or request front desk valet assist.`,
-                });
-              }
-            }
-
-            // Target Reached Alert (EV06, EV04)
-            if (s.deliveredKwh >= s.targetKwh - 0.01) {
-              s.status = 'target_reached';
-              s.allocatedKw = 0;
-              s.targetReachedAt = nextIso;
-              s.notificationsSent.targetReached = true;
-
-              addEvent({
-                timestamp: nextIso,
-                requestId: s.requestId,
-                vehicleId: s.vehicleId,
-                type: 'success',
-                category: 'charging',
-                message: `Target Reached: ${s.vehicleId} reached ${s.targetKwh} kWh. Charger power released. Please vacate bay by agreed time ${s.agreedMoveByTime.slice(11, 16)}.`,
-              });
-
-              // Update corresponding bay status to occupied_idle
-              setBays((baysList) =>
-                baysList.map((b) =>
-                  b.bayId === s.bayId
-                    ? { ...b, currentStatus: 'occupied_idle', allocatedKw: 0 }
-                    : b
-                )
-              );
-            }
-          }
-
-          // Overdue Warning (EV06, EV14)
-          if (
-            s.status === 'target_reached' &&
-            s.bayId &&
-            !s.notificationsSent.overdueWarning
-          ) {
-            const isOverdue = nextIso > s.agreedMoveByTime;
-            if (isOverdue) {
-              s.notificationsSent.overdueWarning = true;
-              addEvent({
-                timestamp: nextIso,
-                requestId: s.requestId,
-                vehicleId: s.vehicleId,
-                type: 'alert',
-                category: 'bay',
-                message: `Overdue Bay Occupancy: ${s.vehicleId} has exceeded agreed move deadline (${s.agreedMoveByTime.slice(11, 16)}). Front desk notified for turnover coordination.`,
-              });
-            }
-          }
-        });
-
-        return nextSessions;
-      });
-
-      return nextIso;
-    });
-  }, [bays, sitePowerBudgetKw, activeAlgorithm, addEvent]);
-
-  // Step minutes wrapper
-  const stepMinutes = useCallback((mins: number) => {
-    advanceTimeByMinutes(mins);
-  }, [advanceTimeByMinutes]);
-
-  // Play / Pause timer effect
-  useEffect(() => {
-    if (!isPlaying) return;
-
-    // Tick every 1 second real-time = playbackSpeed minutes simulation time
-    const interval = setInterval(() => {
-      advanceTimeByMinutes(playbackSpeed);
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [isPlaying, playbackSpeed, advanceTimeByMinutes]);
-
-  const togglePlay = () => setIsPlaying((p) => !p);
-  const setSpeed = (s: number) => setPlaybackSpeed(s);
-
-  // EV01: Guest submits charging request
-  const submitRequest = useCallback(
-    (input: VehicleRequestInput): { success: boolean; requestId?: string; error?: string } => {
-      if (!input.vehicleId.trim()) {
-        return { success: false, error: 'Vehicle ID / Plate is required.' };
-      }
-
-      let targetKwh = 0;
-      let targetPercent = 100;
-      let batteryCapacity = input.batteryCapacityKwh || 60;
-      let initialSoc = input.currentPercent || 30;
-
-      if (input.inputMode === 'kwh') {
-        if (!input.targetKwh || input.targetKwh <= 0) {
-          return { success: false, error: 'Target energy must be greater than 0 kWh.' };
-        }
-        targetKwh = input.targetKwh;
-        targetPercent = Math.min(100, Math.round(initialSoc + (targetKwh / batteryCapacity) * 100));
-      } else {
-        if (input.currentPercent === undefined || input.targetPercent === undefined) {
-          return { success: false, error: 'Current battery % and Target % are required.' };
-        }
-        if (input.currentPercent >= input.targetPercent) {
-          return { success: false, error: 'Target percentage must be higher than current battery level.' };
-        }
-        if (input.targetPercent > 100) {
-          return { success: false, error: 'Target percentage cannot exceed 100%.' };
-        }
-        targetPercent = input.targetPercent;
-        initialSoc = input.currentPercent;
-        targetKwh = Math.round(((targetPercent - initialSoc) / 100) * batteryCapacity * 10) / 10;
-      }
-
-      if (!input.useByTime) {
-        return { success: false, error: 'Departure / Use-by time is required.' };
-      }
-      if (new Date(input.useByTime).getTime() <= new Date(currentTimeIso).getTime()) {
-        return { success: false, error: 'Departure time must be in the future.' };
-      }
-
-      const requestId = `req-${Date.now()}`;
-      const vacantBay = bays.find((b) => b.currentStatus === 'vacant');
-
-      // Check feasibility (EV02)
-      const feasibility = estimateChargingFeasibility(
-        targetKwh,
-        input.useByTime,
-        input.requestedMoveTime || input.useByTime,
-        currentTimeIso,
-        chargerMaxKw,
-        !!vacantBay,
-        vacantBay ? 0 : 45
-      );
-
-      const newSession: ChargingSession = {
-        requestId,
-        vehicleId: input.vehicleId.toUpperCase().trim(),
-        guestName: input.guestName.trim() || 'Hotel Guest',
-        roomNumber: input.roomNumber.trim() || '101',
-        batteryCapacityKwh: batteryCapacity,
-        initialSocPercent: initialSoc,
-        targetKwh,
-        targetPercent,
-        arrivalTime: currentTimeIso,
-        useByTime: input.useByTime,
-        agreedMoveByTime: input.requestedMoveTime || feasibility.plannedLatestFinishTime,
-        moveMethod: input.moveMethod || 'self',
-
-        estimatedStartTime: feasibility.estimatedStartTime,
-        estimatedFinishTime: feasibility.estimatedFinishTime,
-        plannedLatestFinishTime: feasibility.plannedLatestFinishTime,
-        isFeasibleOnTime: feasibility.isFeasibleOnTime,
-        projectedDeficitKwh: feasibility.projectedDeficitKwh,
-        guestAcceptedDeficit: false,
-
-        status: 'pending_confirmation', // Enters EV02 review
-        bayId: null,
-        deliveredKwh: 0,
-        allocatedKw: 0,
-        maxChargeKw: chargerMaxKw,
-        pluggedInAt: null,
-        targetReachedAt: null,
-        bayReleasedAt: null,
-        notificationsSent: { fifteenMinWarning: false, targetReached: false, overdueWarning: false },
-      };
-
-      setSessions((prev) => [newSession, ...prev]);
-      setActiveRequestId(requestId);
-
-      addEvent({
-        timestamp: currentTimeIso,
-        requestId,
-        vehicleId: newSession.vehicleId,
-        type: 'info',
-        category: 'queue',
-        message: `Charging plan generated for ${newSession.vehicleId}. Awaiting guest plan confirmation.`,
-      });
-
-      return { success: true, requestId };
-    },
-    [currentTimeIso, bays, chargerMaxKw, addEvent]
-  );
-
-  // EV02: Guest reviews and confirms plan
-  const confirmPlan = useCallback(
-    (requestId: string, agreedMoveTime: string, acceptedDeficit = false) => {
-      setSessions((prev) => {
-        return prev.map((s) => {
-          if (s.requestId !== requestId) return s;
-
-          // Check if bay is vacant right now
-          const vacantBay = bays.find((b) => b.currentStatus === 'vacant');
-
-          let nextStatus = vacantBay ? 'charging' : 'waiting_bay';
-          let assignedBayId = vacantBay ? vacantBay.bayId : null;
-
-          if (vacantBay) {
-            // Immediately reserve bay
-            setBays((bList) =>
-              bList.map((b) =>
-                b.bayId === vacantBay.bayId
-                  ? {
-                      ...b,
-                      currentStatus: 'occupied_charging',
-                      currentVehicleId: s.vehicleId,
-                      currentRequestId: s.requestId,
-                    }
-                  : b
-              )
-            );
-          }
-
-          const updated: ChargingSession = {
-            ...s,
-            status: nextStatus as any,
-            bayId: assignedBayId,
-            agreedMoveByTime: agreedMoveTime,
-            guestAcceptedDeficit: acceptedDeficit,
-            pluggedInAt: vacantBay ? currentTimeIso : null,
-          };
-
-          addEvent({
-            timestamp: currentTimeIso,
-            requestId: s.requestId,
-            vehicleId: s.vehicleId,
-            type: 'success',
-            category: 'charging',
-            message: vacantBay
-              ? `Plan confirmed for ${s.vehicleId}. Assigned to ${vacantBay.name}, charging initiated.`
-              : `Plan confirmed for ${s.vehicleId}. All bays currently occupied; queued in arrival order.`,
-          });
-
-          return updated;
-        });
-      });
-    },
-    [bays, currentTimeIso, addEvent]
-  );
-
-  // EV07: Guest requests staff valet assistance
-  const requestValetAssistance = useCallback(
-    (requestId: string, note: string) => {
-      setSessions((prev) => {
-        return prev.map((s) => {
-          if (s.requestId !== requestId) return s;
-          if (s.valetTask && (s.valetTask.status === 'pending_review' || s.valetTask.status === 'accepted')) {
-            return s; // Prevent duplicate pending application
-          }
-
-          const task: ValetTask = {
-            taskId: `valet-${Date.now()}`,
-            requestId: s.requestId,
-            vehicleId: s.vehicleId,
-            bayId: s.bayId || 'bay-1',
-            requestedAt: currentTimeIso,
-            status: 'pending_review',
-            authorizationConfirmed: true,
-            keysHandoverNote: note || 'Keys handed over at front desk key drop.',
-            keysReceived: true,
-            staffAssigned: null,
-            destinationBay: null,
-          };
-
-          addEvent({
-            timestamp: currentTimeIso,
-            requestId: s.requestId,
-            vehicleId: s.vehicleId,
-            type: 'info',
-            category: 'valet',
-            message: `Valet assistance requested by ${s.vehicleId}. Keys note: "${task.keysHandoverNote}". Pending front desk verification.`,
-          });
-
-          return {
-            ...s,
-            moveMethod: 'valet',
-            valetTask: task,
-          };
-        });
-      });
-    },
-    [currentTimeIso, addEvent]
-  );
-
-  // EV08: Front desk reviews and accepts or rejects valet task
-  const reviewValetTask = useCallback(
-    (
-      taskId: string,
-      approved: boolean,
-      params?: {
-        staffAssigned?: string;
-        destinationBay?: string;
-        rejectionReason?: string;
-        keysReceived?: boolean;
-        authorizationConfirmed?: boolean;
-      }
-    ) => {
-      setSessions((prev) => {
-        return prev.map((s) => {
-          if (!s.valetTask || s.valetTask.taskId !== taskId) return s;
-
-          if (approved) {
-            const staff = params?.staffAssigned || staffOnDuty[0];
-            const stall = params?.destinationBay || `Standard Stall #${Math.floor(Math.random() * 20) + 1}`;
-
-            const updatedTask: ValetTask = {
-              ...s.valetTask,
-              status: 'accepted',
-              staffAssigned: staff,
-              destinationBay: stall,
-              keysReceived: params?.keysReceived ?? true,
-              authorizationConfirmed: params?.authorizationConfirmed ?? true,
-            };
-
-            addEvent({
-              timestamp: currentTimeIso,
-              requestId: s.requestId,
-              vehicleId: s.vehicleId,
-              type: 'info',
-              category: 'valet',
-              message: `Valet task accepted for ${s.vehicleId}. Assigned staff: ${staff}. Destination: ${stall}.`,
-            });
-
-            return {
-              ...s,
-              valetTask: updatedTask,
-            };
-          } else {
-            const reason = params?.rejectionReason || 'Staff currently unavailable for valet duty. Please move vehicle directly.';
-            const updatedTask: ValetTask = {
-              ...s.valetTask,
-              status: 'rejected',
-              rejectionReason: reason,
-            };
-
-            addEvent({
-              timestamp: currentTimeIso,
-              requestId: s.requestId,
-              vehicleId: s.vehicleId,
-              type: 'warning',
-              category: 'valet',
-              message: `Valet task declined for ${s.vehicleId}: ${reason}. Guest notified to move car manually.`,
-            });
-
-            return {
-              ...s,
-              valetTask: updatedTask,
-            };
-          }
-        });
-      });
-    },
-    [currentTimeIso, staffOnDuty, addEvent]
-  );
-
-  // EV09: Confirm Bay Released (Physical check & turnover + advance queue)
-  const confirmBayReleased = useCallback(
-    (bayId: string, notes?: string) => {
-      setBays((prevBays) => {
-        const targetBay = prevBays.find((b) => b.bayId === bayId);
-        if (!targetBay || targetBay.currentStatus === 'vacant') return prevBays;
-
-        const vehicleLeavingId = targetBay.currentVehicleId;
-        const requestLeavingId = targetBay.currentRequestId;
-
-        // Archive completed session
-        setSessions((prevSessions) => {
-          const updatedSessions = [...prevSessions];
-          const leavingSessionIndex = updatedSessions.findIndex((s) => s.requestId === requestLeavingId);
-
-          if (leavingSessionIndex >= 0) {
-            const s = updatedSessions[leavingSessionIndex];
-            s.bayReleasedAt = currentTimeIso;
-            s.bayId = null;
-
-            // Archive to history
-            const overstayMins = Math.max(0, getMinutesDiff(s.agreedMoveByTime, currentTimeIso));
-            const idleFee = overstayMins > idleGracePeriodMins ? (overstayMins - idleGracePeriodMins) * idleFeePerMin : 0;
-
-            const record: HistoryRecord = {
-              id: `hist-${Date.now()}`,
-              requestId: s.requestId,
-              vehicleId: s.vehicleId,
-              guestName: s.guestName,
-              roomNumber: s.roomNumber,
-              arrivalTime: s.arrivalTime,
-              departureTime: currentTimeIso,
-              targetKwh: s.targetKwh,
-              actualDeliveredKwh: Math.round(s.deliveredKwh * 10) / 10,
-              targetAchieved: s.deliveredKwh >= s.targetKwh - 0.1,
-              onTimeCompletion: s.deliveredKwh >= s.targetKwh - 0.1 && currentTimeIso <= s.useByTime,
-              scheduledMoveTime: s.agreedMoveByTime,
-              actualReleaseTime: currentTimeIso,
-              overstayMinutes: overstayMins,
-              simulatedFeeCharged: Math.round(idleFee * 100) / 100,
-              valetUsed: s.valetTask?.status === 'completed' || s.moveMethod === 'valet',
-              notes: notes || 'Bay released and verified vacant by staff.',
-            };
-
-            setHistoryRecords((h) => [record, ...h]);
-          }
-
-          // Check for NEXT in queue
-          const nextInQueue = updatedSessions.find((s) => s.status === 'waiting_bay');
-
-          if (nextInQueue) {
-            // Assign next car to this freed bay
-            nextInQueue.status = 'charging';
-            nextInQueue.bayId = bayId;
-            nextInQueue.pluggedInAt = currentTimeIso;
-
-            addEvent({
-              timestamp: currentTimeIso,
-              requestId: nextInQueue.requestId,
-              vehicleId: nextInQueue.vehicleId,
-              type: 'success',
-              category: 'queue',
-              message: `Bay ${targetBay.bayNumber} vacated by ${vehicleLeavingId}. Next vehicle ${nextInQueue.vehicleId} automatically admitted and plugged in!`,
-            });
-          } else {
-            addEvent({
-              timestamp: currentTimeIso,
-              vehicleId: vehicleLeavingId || undefined,
-              type: 'info',
-              category: 'bay',
-              message: `Bay ${targetBay.bayNumber} physically inspected and confirmed vacant. No vehicles in queue.`,
-            });
-          }
-
-          return updatedSessions;
-        });
-
-        // Update bay state
-        return prevBays.map((b) => {
-          if (b.bayId !== bayId) return b;
-
-          // Check if queue car was assigned
-          const nextInQueue = sessions.find((s) => s.status === 'waiting_bay');
-          if (nextInQueue) {
-            return {
-              ...b,
-              currentStatus: 'occupied_charging',
-              currentVehicleId: nextInQueue.vehicleId,
-              currentRequestId: nextInQueue.requestId,
-              allocatedKw: 0,
-            };
-          } else {
-            return {
-              ...b,
-              currentStatus: 'vacant',
-              currentVehicleId: null,
-              currentRequestId: null,
-              allocatedKw: 0,
-            };
-          }
-        });
-      });
-    },
-    [currentTimeIso, idleGracePeriodMins, idleFeePerMin, sessions, addEvent]
-  );
-
-  // EV08/EV09: Complete Valet Task (Staff parks vehicle in standard stall, then frees bay)
-  const completeValetTask = useCallback(
-    (taskId: string) => {
-      let bayToRelease: string | null = null;
-      let vehId = '';
-
-      setSessions((prev) => {
-        return prev.map((s) => {
-          if (!s.valetTask || s.valetTask.taskId !== taskId) return s;
-
-          bayToRelease = s.bayId;
-          vehId = s.vehicleId;
-
-          const updatedTask: ValetTask = {
-            ...s.valetTask,
-            status: 'completed',
-            completedAt: currentTimeIso,
-          };
-
-          addEvent({
-            timestamp: currentTimeIso,
-            requestId: s.requestId,
-            vehicleId: s.vehicleId,
-            type: 'success',
-            category: 'valet',
-            message: `Valet Completed: Staff relocated ${s.vehicleId} to ${s.valetTask.destinationBay || 'Standard Stall'}. Charger bay released.`,
-          });
-
-          return {
-            ...s,
-            valetTask: updatedTask,
-          };
-        });
-      });
-
-      if (bayToRelease) {
-        confirmBayReleased(bayToRelease, `Valet moved vehicle to regular parking stall.`);
-      }
-    },
-    [currentTimeIso, confirmBayReleased, addEvent]
-  );
-
-  // EV05: Confirm vehicle parked and plugged
-  const confirmVehicleParkedAndPlugged = useCallback(
-    (bayId: string, vehicleId: string) => {
-      setBays((prev) =>
-        prev.map((b) =>
-          b.bayId === bayId
-            ? { ...b, currentStatus: 'occupied_charging', currentVehicleId: vehicleId }
-            : b
-        )
-      );
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.vehicleId === vehicleId
-            ? { ...s, bayId, status: 'charging', pluggedInAt: currentTimeIso }
-            : s
-        )
-      );
-
-      addEvent({
-        timestamp: currentTimeIso,
-        vehicleId,
-        type: 'info',
-        category: 'bay',
-        message: `${vehicleId} confirmed plugged into Bay ${bayId}. Charging authorized.`,
-      });
-    },
-    [currentTimeIso, addEvent]
-  );
-
-  // EV12: Request Extension
-  const requestExtension = useCallback(
-    (requestId: string, newTime: string, reason: string) => {
-      setSessions((prev) =>
-        prev.map((s) => {
-          if (s.requestId !== requestId) return s;
-
-          const ext: ExtensionRequest = {
-            requestId: s.requestId,
-            vehicleId: s.vehicleId,
-            currentDeadline: s.agreedMoveByTime,
-            requestedDeadline: newTime,
-            reason: reason || 'Guest needs extra parking time.',
-            status: 'pending',
-            requestedAt: currentTimeIso,
-          };
-
-          addEvent({
-            timestamp: currentTimeIso,
-            requestId: s.requestId,
-            vehicleId: s.vehicleId,
-            type: 'info',
-            category: 'queue',
-            message: `${s.vehicleId} requested parking extension until ${newTime.slice(11, 16)}. Reason: "${ext.reason}". Pending front desk review.`,
-          });
-
-          return { ...s, extensionRequest: ext };
-        })
-      );
-    },
-    [currentTimeIso, addEvent]
-  );
-
-  // EV12: Front Desk Review Extension
-  const reviewExtensionRequest = useCallback(
-    (requestId: string, approved: boolean) => {
-      setSessions((prev) =>
-        prev.map((s) => {
-          if (s.requestId !== requestId || !s.extensionRequest) return s;
-
-          if (approved) {
-            const newDeadline = s.extensionRequest.requestedDeadline;
-            addEvent({
-              timestamp: currentTimeIso,
-              requestId: s.requestId,
-              vehicleId: s.vehicleId,
-              type: 'success',
-              category: 'queue',
-              message: `Extension approved for ${s.vehicleId}. New agreed move-by time: ${newDeadline.slice(11, 16)}.`,
-            });
-
-            return {
-              ...s,
-              agreedMoveByTime: newDeadline,
-              extensionRequest: {
-                ...s.extensionRequest,
-                status: 'approved',
-                reviewedAt: currentTimeIso,
-              },
-            };
-          } else {
-            addEvent({
-              timestamp: currentTimeIso,
-              requestId: s.requestId,
-              vehicleId: s.vehicleId,
-              type: 'warning',
-              category: 'queue',
-              message: `Extension rejected for ${s.vehicleId} due to incoming queue demand. Original deadline ${s.agreedMoveByTime.slice(11, 16)} remains in effect.`,
-            });
-
-            return {
-              ...s,
-              extensionRequest: {
-                ...s.extensionRequest,
-                status: 'rejected',
-                reviewedAt: currentTimeIso,
-              },
-            };
-          }
-        })
-      );
-    },
-    [currentTimeIso, addEvent]
-  );
-
-  // EV11: Modify Request
-  const modifyRequest = useCallback(
-    (requestId: string, newTargetKwh: number, newUseByTime: string): { success: boolean; error?: string } => {
-      const session = sessions.find((s) => s.requestId === requestId);
-      if (!session) return { success: false, error: 'Session not found' };
-
-      if (newTargetKwh < session.deliveredKwh) {
-        return {
-          success: false,
-          error: `New target cannot be lower than already delivered energy (${session.deliveredKwh.toFixed(1)} kWh).`,
-        };
-      }
-
-      setSessions((prev) =>
-        prev.map((s) => {
-          if (s.requestId !== requestId) return s;
-          return {
-            ...s,
-            targetKwh: newTargetKwh,
-            useByTime: newUseByTime,
-          };
-        })
-      );
-
-      addEvent({
-        timestamp: currentTimeIso,
-        requestId,
-        vehicleId: session.vehicleId,
-        type: 'info',
-        category: 'charging',
-        message: `${session.vehicleId} modified charging request: Target ${newTargetKwh} kWh, Depart by ${newUseByTime.slice(11, 16)}.`,
-      });
-
-      return { success: true };
-    },
-    [sessions, currentTimeIso, addEvent]
-  );
-
-  // EV11: Cancel Request
-  const cancelRequest = useCallback(
-    (requestId: string) => {
-      const session = sessions.find((s) => s.requestId === requestId);
-      if (!session) return;
-
-      if (session.bayId) {
-        confirmBayReleased(session.bayId, 'Session cancelled by guest; vehicle cleared.');
-      }
-
-      setSessions((prev) =>
-        prev.map((s) =>
-          s.requestId === requestId
-            ? { ...s, status: 'cancelled', allocatedKw: 0, bayId: null }
-            : s
-        )
-      );
-
-      addEvent({
-        timestamp: currentTimeIso,
-        requestId,
-        vehicleId: session.vehicleId,
-        type: 'warning',
-        category: 'queue',
-        message: `Charging request cancelled for ${session.vehicleId}.`,
-      });
-    },
-    [sessions, confirmBayReleased, currentTimeIso, addEvent]
-  );
-
-  const dismissEvent = useCallback((eventId: string) => {
-    setSystemEvents((prev) => prev.filter((e) => e.id !== eventId));
-  }, []);
-
-  const clearAllEvents = useCallback(() => {
-    setSystemEvents([]);
-  }, []);
-
+    if (s.status === 'pending_confirmation') cars.push(candidate);
+    predictions[s.requestId] = predictCharging(
+      candidate,
+      cars,
+      state.bays,
+      sitePowerBudgetKw,
+      activeAlgorithm,
+      state.currentTimeIso,
+    );
+  }
+  return {
+    ...state,
+    activePresetId,
+    allPresets: ALL_PRESETS,
+    loadPreset,
+    resetSimulation,
+    activeRequestId,
+    setActiveRequestId,
+    activeSession:
+      state.sessions.find((s) => s.requestId === activeRequestId) || null,
+    userRole,
+    setUserRole,
+    isPlaying,
+    togglePlay: () => setIsPlaying((p) => !p),
+    playbackSpeed,
+    setSpeed: setPlaybackSpeed,
+    stepMinutes,
+    sitePowerBudgetKw,
+    setSitePowerBudgetKw,
+    activeAlgorithm,
+    setActiveAlgorithm,
+    chargerMaxKw: state.bays[0]?.maxKw || 0,
+    setChargerMaxKw,
+    totalAllocatedPowerKw: state.sessions.reduce(
+      (n, s) => n + s.allocatedKw,
+      0,
+    ),
+    staffOnDuty,
+    availableStandardStalls:
+      12 -
+      state.sessions.filter((s) => s.valetTask?.status === 'completed').length,
+    idleGracePeriodMins,
+    idleFeePerMin,
+    extensionLimitMinutes,
+    setExtensionLimitMinutes,
+    predictions,
+    submitRequest,
+    confirmPlan,
+    confirmVehicleParkedAndPlugged,
+    reportVehicleMoved,
+    confirmBayReleased,
+    cancelRequest,
+    modifyRequest,
+    requestExtension,
+    reviewExtensionRequest,
+    requestValetAssistance,
+    reviewValetTask,
+    completeValetTask,
+    dismissEvent: (id: string) =>
+      change((d) => {
+        d.systemEvents = d.systemEvents.filter((e) => e.id !== id);
+      }),
+    clearAllEvents: () =>
+      change((d) => {
+        d.systemEvents = [];
+      }),
+  };
+}
+const SimulationContext = createContext<ReturnType<
+  typeof useSimulationState
+> | null>(null);
+export const SimulationProvider: React.FC<{ children: React.ReactNode }> = ({
+  children,
+}) => {
+  const value = useSimulationState();
   return (
-    <SimulationContext.Provider
-      value={{
-        currentTimeIso,
-        isPlaying,
-        playbackSpeed,
-        togglePlay,
-        setSpeed,
-        stepMinutes,
-        resetSimulation,
-        loadPreset,
-        activePresetId,
-        allPresets: ALL_PRESETS,
-
-        sitePowerBudgetKw,
-        setSitePowerBudgetKw,
-        activeAlgorithm,
-        setActiveAlgorithm,
-        chargerMaxKw,
-        totalAllocatedPowerKw,
-        availableStandardStalls,
-        staffOnDuty,
-        idleGracePeriodMins,
-        idleFeePerMin,
-
-        bays,
-        sessions,
-        activeSession,
-        activeRequestId,
-        setActiveRequestId,
-        systemEvents,
-        historyRecords,
-
-        userRole,
-        setUserRole,
-
-        submitRequest,
-        confirmPlan,
-        requestValetAssistance,
-        requestExtension,
-        modifyRequest,
-        cancelRequest,
-
-        confirmVehicleParkedAndPlugged,
-        reviewValetTask,
-        completeValetTask,
-        confirmBayReleased,
-        reviewExtensionRequest,
-        dismissEvent,
-        clearAllEvents,
-      }}
-    >
+    <SimulationContext.Provider value={value}>
       {children}
     </SimulationContext.Provider>
   );
 };
-
-export const useSimulation = () => {
-  const context = useContext(SimulationContext);
-  if (!context) {
-    throw new Error('useSimulation must be used within a SimulationProvider');
-  }
-  return context;
-};
+export function useSimulation() {
+  const state = useContext(SimulationContext);
+  if (!state)
+    throw new Error('useSimulation must be used within SimulationProvider');
+  return state;
+}

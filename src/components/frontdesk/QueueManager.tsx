@@ -6,7 +6,7 @@ import { Hourglass, Clock, Zap, Car, AlertCircle } from 'lucide-react';
 export const QueueManager: React.FC = () => {
   const { sessions, currentTimeIso, bays } = useSimulation();
 
-  const queuedSessions = sessions.filter((s) => s.status === 'waiting_bay');
+  const queuedSessions = sessions.filter((s) => s.status === 'waiting_bay').sort((a, b) => Date.parse(a.arrivalTime) - Date.parse(b.arrivalTime));
   const vacantBayCount = bays.filter((b) => b.currentStatus === 'vacant').length;
 
   return (
