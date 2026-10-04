@@ -23,22 +23,23 @@ export type ValetTaskStatus =
 
 export type ExtensionStatus = 'pending' | 'approved' | 'rejected';
 
+export type VehicleTypeId = 'A' | 'B' | 'C' | 'D';
+
 export interface VehicleRequestInput {
-  vehicleId: string;
+  vehicleType: VehicleTypeId;
   guestName: string;
   roomNumber: string;
   inputMode: 'kwh' | 'percentage';
-  targetKwh?: number;
-  batteryCapacityKwh?: number;
   currentPercent?: number;
   targetPercent?: number;
-  maxChargeKw?: number; // Vehicle AC acceptance limit, independent of the charger.
-  useByTime: string; // ISO string
+  registrationMode?: 'book_ahead' | 'register_now';
+  arrivalTime?: string;
   requestedMoveTime: string; // ISO string
   moveMethod: 'self' | 'valet';
 }
 
 export interface ChargingSession {
+  vehicleType?: VehicleTypeId; // Custom engineering scenarios can use independent parameters.
   requestId: string;
   vehicleId: string;
   guestName: string;
@@ -48,7 +49,6 @@ export interface ChargingSession {
   targetKwh: number;
   targetPercent: number;
   arrivalTime: string; // ISO string
-  useByTime: string; // ISO string
   agreedMoveByTime: string; // ISO string
   moveMethod: 'self' | 'valet';
 
@@ -65,13 +65,20 @@ export interface ChargingSession {
   completionWindowEnd?: string;
   moveReportedAt?: string | null;
   simulatedValetMoved?: boolean;
+  registrationMode?: 'book_ahead' | 'register_now';
+  arrivalConfirmed?: boolean;
+  committedKwh?: number; // Explicitly accepted charging promise, separate from the original goal.
+  commitmentReachedAt?: string | null;
+  chargingStoppedAt?: string | null;
+  acceptedEarlyDeparture?: boolean;
+  earlyDepartureEstimatePercent?: number;
 
   // Real-time dynamic state
   status: ChargingStatus;
   bayId: string | null; // e.g. "bay-1"
   deliveredKwh: number;
   allocatedKw: number;
-  maxChargeKw: number; // car/charger maximum kW capability (e.g. 7.0 kW or 11.0 kW)
+  maxChargeKw: number; // Vehicle AC acceptance limit, separate from charger limits.
   pluggedInAt: string | null;
   targetReachedAt: string | null;
   bayReleasedAt: string | null;
@@ -141,6 +148,19 @@ export interface SystemEvent {
 }
 
 export interface HistoryRecord {
+  vehicleType?: VehicleTypeId;
+  targetPercent: number;
+  actualPercent: number;
+  chargingStartedAt: string | null;
+  chargingCompletedAt: string | null;
+  chargingStoppedAt: string | null;
+  actualMoveTime: string | null;
+  archivedAt: string;
+  acceptedEarlyDeparture: boolean;
+  earlyDepartureDeficitKwh: number;
+  valetTask?: ValetTask;
+  hadBay: boolean;
+  session: ChargingSession; // Immutable final snapshot; never used as a live bay occupant.
   id: string;
   requestId: string;
   vehicleId: string;
@@ -158,6 +178,8 @@ export interface HistoryRecord {
   simulatedFeeCharged: number;
   valetUsed: boolean;
   notes: string;
+  commitmentFulfilled?: boolean;
+  outcomeReason?: string;
 }
 
 export type AllocationAlgorithm = 'equal_sharing' | 'demand_urgency';
@@ -176,6 +198,10 @@ export interface SimulationResultMetrics {
   policyId: string;
   policyName: string;
   totalVehicles: number;
+  targetSuccessRatePercent: number;
+  commitmentSuccessRatePercent: number;
+  guestEarlyDepartureCount: number;
+  guestEarlyDepartureDeficitKwh: number;
   vehiclesCompletedOnTime: number;
   onTimeSuccessRatePercent: number;
   totalRequestedKwh: number;
@@ -193,10 +219,18 @@ export interface SimulationResultMetrics {
     type: 'success' | 'warning' | 'alert' | 'info';
   }[];
   vehicleOutcomes: {
+    requestId: string;
+    guestName: string;
+    roomNumber: string;
+    vehicleType?: VehicleTypeId;
     vehicleId: string;
     targetKwh: number;
     deliveredKwh: number;
     onTime: boolean;
+    targetAchieved: boolean;
+    commitmentFulfilled: boolean;
+    acceptedEarlyDeparture: boolean;
+    outcomeReason: string;
     queueWaitMins: number;
     idleOccupancyMins: number;
     deadline: string;

@@ -1,4 +1,8 @@
-import { useState } from 'react';
+import { VehicleTypeSelector } from './VehicleTypeSelector';
+import { getVehicleType } from '../../data/vehicleTypes';
+import type { VehicleTypeId } from '../../types';
+import { addMinutesToIso } from '../../utils/time';
+import { useState, useEffect } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
 import {
   Field,
@@ -16,13 +20,28 @@ export function ModifyModal({
   onClose: () => void;
   requestId: string;
 }) {
-  const { sessions, modifyRequest, cancelRequest } = useSimulation();
+  const {
+    sessions,
+    modifyRequest,
+    cancelRequest,
+    getMovePreview,
+    extensionLimitMinutes,
+  } = useSimulation();
   const s = sessions.find((s) => s.requestId === requestId);
   const [target, setTarget] = useState(s?.targetPercent || 80),
-    [ac, setAc] = useState(s?.maxChargeKw || 11),
-    [useBy, setUseBy] = useState(s?.useByTime || ''),
+    [vehicleType, setVehicleType] = useState<VehicleTypeId>(
+      s?.vehicleType || 'A',
+    ),
     [move, setMove] = useState(s?.agreedMoveByTime || ''),
     [error, setError] = useState<string | null>(null);
+  const [accepted, setAccepted] = useState(false);
+  const preview = s
+    ? getMovePreview(requestId, move, target, vehicleType)
+    : null;
+  useEffect(
+    () => setAccepted(false),
+    [preview?.expectedPercent, preview?.requiresAcceptance],
+  );
   if (!isOpen || !s) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
@@ -30,7 +49,13 @@ export function ModifyModal({
         className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
-          const result = modifyRequest(requestId, target, useBy, ac, move);
+          const result = modifyRequest(
+            requestId,
+            target,
+            vehicleType,
+            move,
+            accepted,
+          );
           if (result.success) onClose();
           else setError(result.error || 'Unable to change this plan.');
         }}
@@ -46,37 +71,67 @@ export function ModifyModal({
             type="number"
             min={
               s.initialSocPercent +
-              (s.deliveredKwh / s.batteryCapacityKwh) * 100
+              (s.deliveredKwh /
+                (getVehicleType(vehicleType)?.batteryCapacityKwh ||
+                  s.batteryCapacityKwh)) *
+                100
             }
             max={100}
             step="any"
             value={target}
-            onChange={(e) => setTarget(Number(e.target.value))}
+            onChange={(e) => {
+              setTarget(Number(e.target.value));
+              setAccepted(false);
+            }}
           />
         </Field>
-        <Field label="Vehicle maximum AC power (kW)">
-          <input
-            required
-            className={fieldClass}
-            type="number"
-            min={0.1}
-            step="any"
-            value={ac}
-            onChange={(e) => setAc(Number(e.target.value))}
-          />
-        </Field>
-        <TimeField label="Need your car by" value={useBy} onChange={setUseBy} />
+        <VehicleTypeSelector
+          value={vehicleType}
+          onChange={(value) => {
+            setVehicleType(value);
+            setAccepted(false);
+          }}
+        />
         <TimeField
           label="Move your car by"
           value={move}
-          onChange={setMove}
-          max={useBy}
+          onChange={(v) => {
+            setMove(v);
+            setAccepted(false);
+          }}
+          max={addMinutesToIso(
+            s.originalLatestFinishTime || s.plannedLatestFinishTime,
+            extensionLimitMinutes,
+          )}
         />
         <p className="text-xs text-slate-400">
-          Changing your use-by or move time does not extend your charging
-          deadline. Use “Request a later time” to explicitly accept delayed
-          charging.
+          Changing your move time does not extend your charging deadline. Use
+          “Request a later time” to explicitly accept delayed charging.
         </p>
+        <ErrorMessage
+          message={
+            preview?.valid
+              ? null
+              : preview?.error || 'Unable to calculate this arrangement.'
+          }
+        />
+        {preview?.valid && preview.requiresAcceptance && (
+          <div className="text-sm text-amber-200 space-y-2">
+            <p>
+              You may not reach {target}%. Estimated battery at your move time:{' '}
+              {preview.expectedPercent.toFixed(1)}% ·{' '}
+              {preview.deficitKwh.toFixed(1)} kWh below target.
+            </p>
+            <label>
+              <input
+                type="checkbox"
+                checked={accepted}
+                onChange={(e) => setAccepted(e.target.checked)}
+              />{' '}
+              I accept a lower battery at departure.
+            </label>
+          </div>
+        )}
         <div className="flex flex-wrap justify-between gap-3">
           <button
             type="button"
@@ -95,7 +150,16 @@ export function ModifyModal({
           >
             Close
           </button>
-          <button className={buttonClass}>Save changes</button>
+          <button
+            className={buttonClass}
+            disabled={
+              !preview?.valid || (preview.requiresAcceptance && !accepted)
+            }
+          >
+            {preview?.requiresAcceptance
+              ? 'Confirm early departure'
+              : 'Save changes'}
+          </button>
         </div>
       </form>
     </div>

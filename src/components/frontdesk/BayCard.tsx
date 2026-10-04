@@ -1,3 +1,4 @@
+import { guestLabel, guestDetails } from '../../utils/guestIdentity';
 import React, { useState } from 'react';
 import { Bay } from '../../types';
 import { useSimulation } from '../../context/SimulationContext';
@@ -81,7 +82,9 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
               </span>
             ) : isTargetReached ? (
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                Target Reached (Occupying)
+                {currentSession?.moveReportedAt
+                  ? 'Move reported — awaiting confirmation'
+                  : 'Charging complete — awaiting move'}
               </span>
             ) : (
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1">
@@ -118,10 +121,10 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
                   Connected Vehicle
                 </span>
                 <span className="font-mono text-lg font-bold text-white tracking-wide">
-                  {currentSession.vehicleId}
+                  {guestLabel(currentSession, sessions)}
                 </span>
                 <span className="text-xs text-slate-400 block">
-                  {currentSession.guestName} · Room {currentSession.roomNumber}
+                  {guestDetails(currentSession)}
                 </span>
               </div>
 
