@@ -24,24 +24,28 @@ export function TimeField({
   onChange,
   min,
   max,
+  required = true,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   min?: string;
   max?: string;
+  required?: boolean;
 }) {
   return (
     <Field label={label}>
       <input
-        required
+        required={required}
         aria-label={label}
         type="datetime-local"
         className={fieldClass}
         value={toAucklandInput(value)}
         min={min ? toAucklandInput(min) : undefined}
         max={max ? toAucklandInput(max) : undefined}
-        onChange={(e) => onChange(fromAucklandInput(e.target.value))}
+        onChange={(e) =>
+          onChange(e.target.value ? fromAucklandInput(e.target.value) : '')
+        }
       />
       <span className="text-xs text-slate-500">
         Pacific/Auckland · DST included. A repeated autumn hour uses the earlier

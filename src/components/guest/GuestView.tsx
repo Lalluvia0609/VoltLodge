@@ -1,3 +1,4 @@
+import { guestLabel, vehicleTypeLabel } from '../../utils/guestIdentity';
 import React, { useState } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
 import { RequestForm } from './RequestForm';
@@ -8,7 +9,11 @@ import { PlusCircle, Car, Clock } from 'lucide-react';
 export const GuestView: React.FC = () => {
   const { activeSession, activeRequestId, setActiveRequestId, sessions } =
     useSimulation();
-  const [isCreatingNew, setIsCreatingNew] = useState<boolean>(!activeRequestId);
+  const [isCreatingNew, setIsCreatingNew] = useState<boolean>(false);
+
+  const [mode, setMode] = useState<'book_ahead' | 'register_now'>(
+    'register_now',
+  );
 
   const handlePlanCreated = (requestId: string) => {
     setActiveRequestId(requestId);
@@ -30,6 +35,7 @@ export const GuestView: React.FC = () => {
           {sessions.map((s) => (
             <button
               key={s.requestId}
+              data-request-id={s.requestId}
               onClick={() => {
                 setActiveRequestId(s.requestId);
                 setIsCreatingNew(false);
@@ -41,7 +47,9 @@ export const GuestView: React.FC = () => {
               }`}
             >
               <Car className="w-3.5 h-3.5" />
-              <span>{s.vehicleId}</span>
+              <span>
+                {guestLabel(s, sessions)} · {vehicleTypeLabel(s)}
+              </span>
               <span
                 className={`w-2 h-2 rounded-full ${
                   s.status === 'charging'
@@ -55,35 +63,42 @@ export const GuestView: React.FC = () => {
               />
             </button>
           ))}
-
-          <button
-            onClick={() => {
-              setActiveRequestId(null);
-              setIsCreatingNew(true);
-            }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition shrink-0 ${
-              isCreatingNew
-                ? 'bg-emerald-500 text-white shadow-sm'
-                : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'
-            }`}
-          >
-            <PlusCircle className="w-3.5 h-3.5" />
-            <span>New charging plan</span>
-          </button>
         </div>
       </div>
 
-      {/* Main Container View Routing */}
+      <div className="max-w-2xl mx-auto px-6 pt-4 flex gap-3">
+        {(['book_ahead', 'register_now'] as const).map((entry) => (
+          <button
+            key={entry}
+            className="px-4 py-2 rounded-xl border border-emerald-500/40 text-emerald-300 text-sm"
+            onClick={() => {
+              setMode(entry);
+              setActiveRequestId(null);
+              setIsCreatingNew(true);
+            }}
+          >
+            <PlusCircle className="inline w-4 h-4 mr-2" />
+            {entry === 'book_ahead' ? 'Book ahead' : 'Register now'}
+          </button>
+        ))}
+      </div>
       {isCreatingNew ? (
-        <RequestForm onPlanCreated={handlePlanCreated} />
+        <RequestForm
+          key={mode}
+          registrationMode={mode}
+          onPlanCreated={handlePlanCreated}
+        />
       ) : activeSession?.status === 'pending_confirmation' ? (
         <PlanReview
           key={activeRequestId}
-          onBackToEdit={() => setIsCreatingNew(true)}
+          onBackToEdit={() => {
+            setMode(activeSession.registrationMode || 'register_now');
+            setIsCreatingNew(true);
+          }}
           onConfirmed={handlePlanConfirmed}
         />
       ) : (
-        <ActiveSession />
+        <ActiveSession key={activeRequestId} />
       )}
     </div>
   );

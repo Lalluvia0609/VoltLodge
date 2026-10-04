@@ -12,12 +12,32 @@ const ms = (iso: string) => Date.parse(iso);
 const iso = (time: number) => new Date(time).toISOString();
 export const remainingEnergy = (s: ChargingSession) =>
   Math.max(0, s.targetKwh - s.deliveredKwh);
+export const limitTime = (value?: string) =>
+  value && Number.isFinite(ms(value)) ? ms(value) : Infinity;
+export const chargingGoal = (s: ChargingSession) =>
+  Math.min(s.targetKwh, s.committedKwh ?? s.targetKwh);
+export const remainingCommitted = (s: ChargingSession) =>
+  Math.max(0, chargingGoal(s) - s.deliveredKwh);
 export const deadlineOf = (s: ChargingSession) =>
-  Math.min(
-    ms(s.chargingDeadline || s.useByTime),
-    ms(s.useByTime),
-    ms(s.agreedMoveByTime),
-  );
+  Math.min(limitTime(s.chargingDeadline), limitTime(s.agreedMoveByTime));
+export function outcomeOf(s: ChargingSession) {
+  const targetAchieved = remainingEnergy(s) < EPS;
+  const commitmentFulfilled =
+    remainingCommitted(s) < EPS &&
+    !!(s.commitmentReachedAt || s.targetReachedAt) &&
+    ms((s.commitmentReachedAt || s.targetReachedAt)!) <= deadlineOf(s) + 1;
+  const acceptedEarlyDeparture = !!s.acceptedEarlyDeparture;
+  return {
+    targetAchieved,
+    commitmentFulfilled,
+    acceptedEarlyDeparture,
+    outcomeReason: !commitmentFulfilled
+      ? 'Charging deadline missed'
+      : acceptedEarlyDeparture && !targetAchieved
+        ? 'Guest accepted early departure'
+        : 'Target reached',
+  };
+}
 export const vehicleCap = (s: ChargingSession, bays: Bay[], budget: number) =>
   Math.max(
     0,
@@ -32,7 +52,7 @@ export const isLive = (s: ChargingSession) =>
   !['pending_confirmation', 'cancelled', 'ended_incomplete'].includes(
     s.status,
   ) &&
-  remainingEnergy(s) > EPS;
+  remainingCommitted(s) > EPS;
 
 export function equalPower(caps: number[], budget: number): number[] {
   const result = caps.map(() => 0);
@@ -184,7 +204,12 @@ export function plannedJobs(
   });
   const jobs: Job[] = [];
   const active = sessions
-    .filter(isLive)
+    .filter(
+      (s) =>
+        isLive(s) ||
+        (!s.bayReleasedAt &&
+          ['waiting_bay', 'waiting_plugin'].includes(s.status)),
+    )
     .sort((a, b) => ms(a.arrivalTime) - ms(b.arrivalTime));
   for (const s of active) {
     const bay = bays.find((b) => b.bayId === s.bayId);
@@ -201,7 +226,7 @@ export function plannedJobs(
     }
     jobs.push({
       id: s.requestId,
-      energy: remainingEnergy(s),
+      energy: remainingCommitted(s),
       cap: Math.max(0, Math.min(s.maxChargeKw, cap ?? 0, budget)),
       start,
       deadline: deadlineOf(s),
@@ -293,11 +318,12 @@ export function calculatePowerAllocation(
       isLive(s) &&
       s.bayId &&
       ['charging', 'paused'].includes(s.status) &&
+      s.arrivalConfirmed !== false &&
       ms(s.arrivalTime) <= now,
   );
   const jobs = connected.map((s) => ({
     id: s.requestId,
-    energy: remainingEnergy(s),
+    energy: remainingCommitted(s),
     cap: vehicleCap(s, bays, sitePowerBudget),
     start: now,
     deadline: deadlineOf(s),
@@ -378,7 +404,11 @@ export function reserveQueue(
     if (next) {
       next.bayId = bay.bayId;
       next.status =
-        remainingEnergy(next) > EPS ? 'waiting_plugin' : 'target_reached';
+        remainingCommitted(next) > EPS
+          ? 'waiting_plugin'
+          : remainingEnergy(next) > EPS
+            ? 'ended_incomplete'
+            : 'target_reached';
       next.targetReachedAt =
         remainingEnergy(next) > EPS
           ? next.targetReachedAt
@@ -435,16 +465,24 @@ export function advanceEngine(
         });
     }
     for (const s of sessions) {
+      if (
+        remainingCommitted(s) <= EPS &&
+        ms(s.arrivalTime) <= now &&
+        (automatic || s.arrivalConfirmed !== false) &&
+        !s.commitmentReachedAt
+      )
+        s.commitmentReachedAt = iso(now);
       if (isLive(s) && deadlineOf(s) <= now) {
         s.status = 'ended_incomplete';
+        s.chargingStoppedAt ||= iso(now);
         s.allocatedKw = 0;
       }
       if (automatic && s.bayId && !s.bayReleasedAt) {
         let release = Infinity;
         if (s.status === 'ended_incomplete' || s.status === 'cancelled')
-          release = ms(s.useByTime);
+          release = limitTime(s.agreedMoveByTime);
         if (s.targetReachedAt) {
-          release = ms(s.useByTime);
+          release = limitTime(s.agreedMoveByTime);
           if (!automatic.managed)
             release = Math.min(release, ms(s.targetReachedAt) + 90 * 60000);
           else if (automatic.assumptions.response) {
@@ -472,6 +510,7 @@ export function advanceEngine(
     if (automatic)
       sessions.forEach((s) => {
         if (s.status === 'waiting_plugin') {
+          s.arrivalConfirmed = true;
           s.status = 'charging';
           s.pluggedInAt = iso(now);
         }
@@ -503,7 +542,7 @@ export function advanceEngine(
         if (ms(s.arrivalTime) > now) next = Math.min(next, ms(s.arrivalTime));
       }
       if (kw > EPS)
-        next = Math.min(next, now + (remainingEnergy(s) / kw) * 3600000);
+        next = Math.min(next, now + (remainingCommitted(s) / kw) * 3600000);
     });
     if (next <= now) break;
     const dt = (next - now) / 60000;
@@ -516,15 +555,22 @@ export function advanceEngine(
     for (const s of sessions) {
       const kw = power.get(s.requestId) || 0;
       if (kw > EPS) {
-        s.deliveredKwh = Math.min(s.targetKwh, s.deliveredKwh + (kw * dt) / 60);
-        if (remainingEnergy(s) <= EPS) {
-          s.deliveredKwh = s.targetKwh;
-          s.status = 'target_reached';
-          s.targetReachedAt = iso(next);
+        s.deliveredKwh = Math.min(
+          chargingGoal(s),
+          s.deliveredKwh + (kw * dt) / 60,
+        );
+        if (remainingCommitted(s) <= EPS) {
+          s.deliveredKwh = chargingGoal(s);
+          s.commitmentReachedAt = iso(next);
+          s.chargingStoppedAt = iso(next);
+          s.status =
+            remainingEnergy(s) <= EPS ? 'target_reached' : 'ended_incomplete';
+          if (remainingEnergy(s) <= EPS) s.targetReachedAt = iso(next);
           s.allocatedKw = 0;
         }
       }
       if (isLive(s) && deadlineOf(s) <= next) {
+        s.chargingStoppedAt = iso(next);
         s.status = 'ended_incomplete';
         s.allocatedKw = 0;
       }
@@ -565,12 +611,14 @@ export function predictCharging(
   nowIso: string,
 ): ChargingPrediction {
   const now = ms(nowIso),
-    remaining = remainingEnergy(s);
+    remaining = remainingCommitted(s);
   const jobs = plannedJobs(sessions, bays, budget, now),
     job = jobs?.find((j) => j.id === s.requestId);
   const start =
     job?.start ??
-    (s.bayId || bays.some((b) => b.currentStatus === 'vacant') ? now : null);
+    (s.bayId || bays.some((b) => b.currentStatus === 'vacant')
+      ? Math.max(now, ms(s.arrivalTime))
+      : null);
   const cap = vehicleCap(s, bays, budget);
   const fastestMinutes = cap > EPS ? (remaining / cap) * 60 : null;
   // Full occupancy assumption: every other bay has a continuously demanding
@@ -592,7 +640,7 @@ export function predictCharging(
   let expected: string | null = null,
     deficitKwh = remaining;
   if (remaining <= EPS) {
-    expected = s.targetReachedAt || nowIso;
+    expected = s.commitmentReachedAt || s.targetReachedAt || nowIso;
     deficitKwh = 0;
   } else if (jobs && budget > 0) {
     let evolving = structuredClone(jobs),
@@ -633,7 +681,10 @@ export function predictCharging(
         ? addMinutesToIso(iso(start), fullLoadMinutes)
         : null,
     expected,
-    waitMinutes: start !== null ? Math.max(0, (start - now) / 60000) : null,
+    waitMinutes:
+      start !== null
+        ? Math.max(0, (start - Math.max(now, ms(s.arrivalTime))) / 60000)
+        : null,
     fastestMinutes,
     fullLoadMinutes,
     feasible:
@@ -664,17 +715,23 @@ export function runSimulationPolicy(
     allocatedKw: 0,
   }));
   const sessions = structuredClone(initialSessions).filter(
-    (s) =>
-      s.status !== 'pending_confirmation' &&
-      !s.bayReleasedAt &&
-      s.status !== 'cancelled',
+    (s) => s.status !== 'pending_confirmation' && !s.bayReleasedAt,
   );
+  let occupied = 0;
   sessions.forEach((s) => {
-    s.status = 'waiting_bay';
-    s.bayId = null;
+    const retainsBay =
+      !!s.bayId &&
+      ms(s.arrivalTime) <= ms(simulationStartIso) &&
+      occupied < bays.length;
+    s.bayId = retainsBay ? bays[occupied++].bayId : null;
+    if (!['cancelled', 'target_reached', 'ended_incomplete'].includes(s.status))
+      s.status = retainsBay ? 'charging' : 'waiting_bay';
     s.allocatedKw = 0;
-    s.pluggedInAt = null;
-    if (remainingEnergy(s) > EPS) s.targetReachedAt = null;
+    s.pluggedInAt = retainsBay ? simulationStartIso : null;
+    if (remainingCommitted(s) > EPS) {
+      s.targetReachedAt = null;
+      s.commitmentReachedAt = null;
+    }
     s.simulatedValetMoved = false;
   });
   const wait = new Map<string, number>(),
@@ -706,9 +763,14 @@ export function runSimulationPolicy(
       },
     );
   const outcomes = state.sessions.map((s) => ({
+    requestId: s.requestId,
+    guestName: s.guestName,
+    roomNumber: s.roomNumber,
+    vehicleType: s.vehicleType,
     vehicleId: s.vehicleId,
     targetKwh: s.targetKwh,
     deliveredKwh: s.deliveredKwh,
+    ...outcomeOf(s),
     onTime:
       !!s.targetReachedAt &&
       ms(s.targetReachedAt) <= deadlineOf(s) + EPS &&
@@ -721,10 +783,23 @@ export function runSimulationPolicy(
   const sum = (fn: (s: (typeof outcomes)[number]) => number) =>
     outcomes.reduce((n, s) => n + fn(s), 0);
   const completed = outcomes.filter((s) => s.onTime).length;
+  const rate = (count: number) =>
+    outcomes.length ? (count / outcomes.length) * 100 : 0;
   return {
     policyId: policy.id,
     policyName: policy.name,
     totalVehicles: outcomes.length,
+    targetSuccessRatePercent: rate(
+      outcomes.filter((s) => s.targetAchieved).length,
+    ),
+    commitmentSuccessRatePercent: rate(
+      outcomes.filter((s) => s.commitmentFulfilled).length,
+    ),
+    guestEarlyDepartureCount: outcomes.filter((s) => s.acceptedEarlyDeparture)
+      .length,
+    guestEarlyDepartureDeficitKwh: sum((s) =>
+      s.acceptedEarlyDeparture ? Math.max(0, s.targetKwh - s.deliveredKwh) : 0,
+    ),
     vehiclesCompletedOnTime: completed,
     onTimeSuccessRatePercent: outcomes.length
       ? (completed / outcomes.length) * 100

@@ -1,3 +1,4 @@
+import { guestLabel, guestDetails } from '../../utils/guestIdentity';
 import React, { useState } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
 import { formatTimeOnly } from '../../utils/time';
@@ -97,6 +98,10 @@ export const ValetTaskManager: React.FC = () => {
           {valetSessions.map((s) => {
             const task = s.valetTask!;
             const isTargetReached = s.status === 'target_reached';
+            const readyToMove =
+              !!s.bayId &&
+              (isTargetReached ||
+                ['cancelled', 'ended_incomplete'].includes(s.status));
 
             return (
               <div
@@ -106,10 +111,10 @@ export const ValetTaskManager: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
                     <span className="font-mono text-sm font-bold text-white">
-                      {task.vehicleId}
+                      {guestLabel(s, sessions)}
                     </span>
                     <span className="text-slate-400">
-                      (Room {s.roomNumber}) ·{' '}
+                      {guestDetails(s)} ·{' '}
                       {s.bayId ? `Bay ${s.bayId.split('-').at(-1)}` : 'Queued'}
                     </span>
                   </div>
@@ -174,7 +179,9 @@ export const ValetTaskManager: React.FC = () => {
                     (
                     {isTargetReached
                       ? 'Target Reached, Ready for Move'
-                      : 'Still Charging'}
+                      : readyToMove
+                        ? 'Charging stopped, waiting for move'
+                        : 'Still Charging'}
                     )
                   </span>
 
@@ -203,16 +210,16 @@ export const ValetTaskManager: React.FC = () => {
                     {task.status === 'accepted' && (
                       <button
                         onClick={() => completeValetTask(task.taskId)}
-                        disabled={!isTargetReached}
+                        disabled={!readyToMove}
                         title={
-                          isTargetReached
+                          readyToMove
                             ? 'Confirm staff moved the car'
                             : 'Wait until the target is reached'
                         }
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white font-semibold shadow-md shadow-emerald-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <Check className="w-3.5 h-3.5" />
-                        <span>Execute Move & Free Charger (EV09)</span>
+                        <span>Confirm staff moved car and bay is clear</span>
                       </button>
                     )}
                   </div>

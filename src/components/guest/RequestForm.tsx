@@ -1,6 +1,8 @@
+import { VehicleTypeSelector } from './VehicleTypeSelector';
+import type { VehicleTypeId } from '../../types';
 import { useState } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
-import { addMinutesToIso } from '../../utils/time';
+import { addMinutesToIso, formatDateTime } from '../../utils/time';
 import {
   Field,
   TimeField,
@@ -9,32 +11,25 @@ import {
   buttonClass,
 } from './GuestFields';
 
-// Fictional AC presets for this simulation, not verified production models.
-const models = [
-  { name: 'Simulation A', capacity: 60, ac: 11 },
-  { name: 'Simulation B', capacity: 60, ac: 11 },
-  { name: 'Simulation C', capacity: 64, ac: 9 },
-  { name: 'Simulation D', capacity: 75, ac: 12 },
-];
 export function RequestForm({
   onPlanCreated,
+  registrationMode = 'register_now',
 }: {
   onPlanCreated: (id: string) => void;
+  registrationMode?: 'book_ahead' | 'register_now';
 }) {
   const { currentTimeIso, submitRequest, activeSession } = useSimulation();
   const draft =
     activeSession?.status === 'pending_confirmation' ? activeSession : null;
-  const [vehicleId, setVehicleId] = useState(
-    draft?.vehicleId || 'EV-' + Math.floor(100 + Math.random() * 900),
+  const [vehicleType, setVehicleType] = useState<VehicleTypeId>(
+    draft?.vehicleType || 'A',
   );
   const [guestName, setGuestName] = useState(draft?.guestName || ''),
     [roomNumber, setRoomNumber] = useState(draft?.roomNumber || '');
-  const [capacity, setCapacity] = useState(draft?.batteryCapacityKwh ?? 60),
-    [ac, setAc] = useState(draft?.maxChargeKw ?? 11);
   const [current, setCurrent] = useState(draft?.initialSocPercent ?? 40),
     [target, setTarget] = useState(draft?.targetPercent ?? 80);
-  const [useBy, setUseBy] = useState(
-    draft?.useByTime || addMinutesToIso(currentTimeIso, 480),
+  const [arrival, setArrival] = useState(
+    draft?.arrivalTime || addMinutesToIso(currentTimeIso, 60),
   );
   const [error, setError] = useState<string | null>(null);
   const number = (
@@ -62,24 +57,27 @@ export function RequestForm({
   );
   return (
     <div className="max-w-2xl mx-auto p-6 space-y-5">
-      <h1 className="text-2xl font-bold text-white">Plan your charge</h1>
+      <h1 className="text-2xl font-bold text-white">
+        {registrationMode === 'book_ahead' ? 'Book ahead' : 'Register now'}
+      </h1>
       <p className="text-sm text-slate-400">
-        Choose your battery target and when you need your car.
+        Step 1 · Tell us your battery target. Choose your move time after seeing
+        the estimate.
       </p>
       <form
         className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-5"
         onSubmit={(e) => {
           e.preventDefault();
           const result = submitRequest({
-            vehicleId,
+            vehicleType,
             guestName,
             roomNumber,
             inputMode: 'percentage',
-            batteryCapacityKwh: capacity,
+            registrationMode,
+            arrivalTime:
+              registrationMode === 'book_ahead' ? arrival : currentTimeIso,
             currentPercent: current,
             targetPercent: target,
-            maxChargeKw: ac,
-            useByTime: useBy,
             requestedMoveTime: '',
             moveMethod: 'self',
           });
@@ -89,15 +87,26 @@ export function RequestForm({
         }}
       >
         <ErrorMessage message={error} />
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="Vehicle registration">
-            <input
-              className={fieldClass}
-              required
-              value={vehicleId}
-              onChange={(e) => setVehicleId(e.target.value)}
+        {registrationMode === 'book_ahead' ? (
+          <>
+            <TimeField
+              label="Expected arrival"
+              value={arrival}
+              onChange={setArrival}
+              min={currentTimeIso}
             />
-          </Field>
+            <p className="text-xs text-slate-400">
+              Current battery below means your expected battery on arrival.
+              Confirm the actual level when you arrive.
+            </p>
+          </>
+        ) : (
+          <p className="text-sm text-slate-300">
+            Arrival: {formatDateTime(currentTimeIso)} · current simulation time
+          </p>
+        )}
+        <VehicleTypeSelector value={vehicleType} onChange={setVehicleType} />
+        <div className="grid sm:grid-cols-2 gap-4">
           <Field label="Your name">
             <input
               className={fieldClass}
@@ -112,44 +121,14 @@ export function RequestForm({
               onChange={(e) => setRoomNumber(e.target.value)}
             />
           </Field>
-          <Field label="Simulation vehicle preset">
-            <select
-              className={fieldClass}
-              defaultValue=""
-              onChange={(e) => {
-                const model = models[Number(e.target.value)];
-                if (model) {
-                  setCapacity(model.capacity);
-                  setAc(model.ac);
-                }
-              }}
-            >
-              <option value="" disabled>
-                Choose, or enter manually
-              </option>
-              {models.map((m, i) => (
-                <option key={m.name} value={i}>
-                  {m.name} · {m.capacity} kWh · {m.ac} kW AC
-                </option>
-              ))}
-            </select>
-          </Field>
           {number('Current battery (%)', current, setCurrent, 0, 99.99)}
           {number('Target battery (%)', target, setTarget, 0, 100)}
-          {number('Usable battery capacity (kWh)', capacity, setCapacity, 0.1)}
-          {number('Vehicle maximum AC power (kW)', ac, setAc, 0.1)}
         </div>
         <p className="text-xs text-slate-400">
           Simulation values, not verified vehicle specifications. AC charging
           only. This estimate ignores charging losses.
         </p>
-        <TimeField
-          label="Need your car by"
-          value={useBy}
-          onChange={setUseBy}
-          min={currentTimeIso}
-        />
-        <button className={buttonClass}>Review charging plan</button>
+        <button className={buttonClass}>Show completion estimate</button>
       </form>
     </div>
   );

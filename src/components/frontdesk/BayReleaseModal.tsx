@@ -1,3 +1,4 @@
+import { guestLabel, guestDetails } from '../../utils/guestIdentity';
 import React, { useState } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
 import { Bay } from '../../types';
@@ -9,28 +10,38 @@ interface BayReleaseModalProps {
   bay: Bay | null;
 }
 
-export const BayReleaseModal: React.FC<BayReleaseModalProps> = ({ isOpen, onClose, bay }) => {
+export const BayReleaseModal: React.FC<BayReleaseModalProps> = ({
+  isOpen,
+  onClose,
+  bay,
+}) => {
   const { confirmBayReleased, sessions, staffOnDuty } = useSimulation();
 
   const [staffOperator, setStaffOperator] = useState(staffOnDuty[0]);
-  const [destinationStall, setDestinationStall] = useState('Standard Stall #12');
-  const [confirmedPhysicalDeparture, setConfirmedPhysicalDeparture] = useState(false);
+  const [destinationStall, setDestinationStall] =
+    useState('Standard Stall #12');
+  const [confirmedPhysicalDeparture, setConfirmedPhysicalDeparture] =
+    useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (!isOpen || !bay) return null;
 
   const currentSession = sessions.find((s) => s.bayId === bay.bayId);
-  const vehicleId = bay.currentVehicleId || currentSession?.vehicleId || 'Unknown Vehicle';
+  const bookingDisplay = currentSession
+    ? `${guestLabel(currentSession, sessions)} · ${guestDetails(currentSession)}`
+    : 'Unknown booking';
 
   const handleConfirm = () => {
     if (!confirmedPhysicalDeparture) {
-      setError('You must visually confirm the vehicle has cleared the bay before releasing.');
+      setError(
+        'You must visually confirm the vehicle has cleared the bay before releasing.',
+      );
       return;
     }
 
     confirmBayReleased(
       bay.bayId,
-      `Inspected and released by ${staffOperator}. Relocated to ${destinationStall}.`
+      `Inspected and released by ${staffOperator}. Relocated to ${destinationStall}.`,
     );
     onClose();
   };
@@ -44,8 +55,12 @@ export const BayReleaseModal: React.FC<BayReleaseModalProps> = ({ isOpen, onClos
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-white">Confirm Bay Released</h3>
-              <p className="text-xs text-slate-400">EV09 – Physical Turnover Inspection</p>
+              <h3 className="text-base font-bold text-white">
+                Confirm Bay Released
+              </h3>
+              <p className="text-xs text-slate-400">
+                EV09 – Physical Turnover Inspection
+              </p>
             </div>
           </div>
           <button
@@ -71,13 +86,16 @@ export const BayReleaseModal: React.FC<BayReleaseModalProps> = ({ isOpen, onClos
             </div>
             <div className="flex justify-between text-slate-300">
               <span>Vacating Vehicle:</span>
-              <span className="font-mono font-bold text-emerald-400">{vehicleId}</span>
+              <span className="font-mono font-bold text-emerald-400">
+                {bookingDisplay}
+              </span>
             </div>
             {currentSession && (
               <div className="flex justify-between text-slate-300">
                 <span>Charge Delivered:</span>
                 <span className="font-mono text-white">
-                  {currentSession.deliveredKwh.toFixed(1)} / {currentSession.targetKwh.toFixed(1)} kWh
+                  {currentSession.deliveredKwh.toFixed(1)} /{' '}
+                  {currentSession.targetKwh.toFixed(1)} kWh
                 </span>
               </div>
             )}
@@ -118,17 +136,24 @@ export const BayReleaseModal: React.FC<BayReleaseModalProps> = ({ isOpen, onClos
               <input
                 type="checkbox"
                 checked={confirmedPhysicalDeparture}
-                onChange={(e) => setConfirmedPhysicalDeparture(e.target.checked)}
+                onChange={(e) =>
+                  setConfirmedPhysicalDeparture(e.target.checked)
+                }
                 className="mt-0.5 rounded border-slate-700 text-emerald-500 focus:ring-emerald-500"
               />
               <span>
-                I visually verify that <strong className="text-white">{vehicleId}</strong> has disconnected cable and fully backed out of <strong className="text-white">{bay.name}</strong>.
+                I visually verify that{' '}
+                <strong className="text-white">{bookingDisplay}</strong> has
+                disconnected cable and fully backed out of{' '}
+                <strong className="text-white">{bay.name}</strong>.
               </span>
             </label>
           </div>
 
           <div className="p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-[11px] text-blue-300">
-            ⚡ Releasing this bay will notify the next waiting vehicle and reserve this bay. Staff must confirm arrival and plug-in before charging starts.
+            ⚡ Releasing this bay will notify the next waiting vehicle and
+            reserve this bay. Staff must confirm arrival and plug-in before
+            charging starts.
           </div>
 
           <div className="flex items-center justify-end gap-2 pt-2">

@@ -1,20 +1,28 @@
+import { guestLabel, guestDetails } from '../../utils/guestIdentity';
 import { useState } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
 import { formatDateTime } from '../../utils/time';
 import { remainingEnergy } from '../../utils/allocation';
+import { getVehicleType } from '../../data/vehicleTypes';
+import { ArrivalReview } from './ArrivalReview';
 import { ValetModal } from './ValetModal';
 import { ExtensionModal } from './ExtensionModal';
 import { ModifyModal } from './ModifyModal';
 import { buttonClass } from './GuestFields';
 export function ActiveSession() {
-  const { activeSession: s, predictions, reportVehicleMoved } = useSimulation();
+  const {
+    activeSession: s,
+    predictions,
+    reportVehicleMoved,
+    sessions,
+  } = useSimulation();
   const [valet, setValet] = useState(false),
     [extension, setExtension] = useState(false),
     [modify, setModify] = useState(false);
   if (!s)
     return (
       <p className="p-8 text-center text-slate-400">
-        Choose a vehicle in the simulation area or create a charging plan.
+        No current vehicles. Choose Book ahead or Register now to create a plan.
       </p>
     );
   const p = predictions[s.requestId],
@@ -23,22 +31,24 @@ export function ActiveSession() {
       s.initialSocPercent + (s.deliveredKwh / s.batteryCapacityKwh) * 100,
     ),
     done = remainingEnergy(s) < 1e-7;
-  const status = s.bayReleasedAt
-    ? 'Car moved'
-    : done
-      ? 'Target reached'
-      : s.moveReportedAt
-        ? 'Waiting for reception to confirm'
+  const status = s.moveReportedAt
+    ? 'Move reported — waiting for reception confirmation'
+    : done && s.bayId
+      ? 'Charging complete — waiting for your car to be moved'
+      : s.status === 'cancelled' && s.bayId
+        ? 'Charging stopped — waiting for your car to be moved'
         : s.status === 'waiting_bay'
           ? 'Waiting for a bay'
           : s.status === 'waiting_plugin'
             ? 'Your bay is reserved'
-            : s.status === 'cancelled'
-              ? 'Charging stopped'
-              : s.status === 'ended_incomplete'
-                ? 'Charging deadline reached'
-                : s.status === 'paused'
-                  ? 'Charging paused'
+            : s.status === 'ended_incomplete'
+              ? s.acceptedEarlyDeparture
+                ? 'Guest accepted early departure — waiting for move'
+                : 'Charging deadline missed — waiting for move'
+              : s.status === 'paused'
+                ? 'Charging paused'
+                : done
+                  ? 'Target reached'
                   : 'Charging';
   const action = s.bayReleasedAt
     ? 'Your charging session has ended.'
@@ -52,6 +62,9 @@ export function ActiveSession() {
             ? `Please move your car by ${formatDateTime(s.agreedMoveByTime)}.`
             : 'You can leave your car charging. We will let you know when your target is reached.';
   const items = [
+    ...(s.vehicleType
+      ? [['Vehicle type', getVehicleType(s.vehicleType)?.label || '']]
+      : []),
     ['Current battery', `${current.toFixed(1)}%`],
     ['Target battery', `${s.targetPercent.toFixed(1)}%`],
     [
@@ -59,7 +72,7 @@ export function ActiveSession() {
       `${formatDateTime(s.completionWindowStart)} — ${formatDateTime(s.completionWindowEnd)}`,
     ],
     [
-      'Expected finish now',
+      'Expected finish',
       done
         ? `Target reached · ${formatDateTime(s.targetReachedAt)}`
         : p?.expected
@@ -68,15 +81,15 @@ export function ActiveSession() {
     ],
     ['Charging deadline', formatDateTime(s.chargingDeadline)],
     ['Move your car by', formatDateTime(s.agreedMoveByTime)],
-    ['Need your car by', formatDateTime(s.useByTime)],
   ];
   return (
     <div className="max-w-3xl mx-auto p-6 space-y-5">
       <div className="flex justify-between gap-3">
         <div>
           <h1 className="font-mono text-2xl font-bold text-white">
-            {s.vehicleId}
+            {guestLabel(s, sessions)}
           </h1>
+          <p className="text-sm text-slate-400 mt-1">{guestDetails(s)}</p>
           <p className="text-sm text-emerald-300 mt-2">{status}</p>
         </div>
         {!s.bayReleasedAt && (
@@ -84,10 +97,22 @@ export function ActiveSession() {
             className="text-sm text-slate-300"
             onClick={() => setModify(true)}
           >
-            Change target
+            Change target or move time
           </button>
         )}
       </div>
+      {s.registrationMode === 'book_ahead' &&
+        !s.arrivalConfirmed &&
+        !s.bayReleasedAt && (
+          <ArrivalReview key={s.requestId} requestId={s.requestId} />
+        )}
+      {s.acceptedEarlyDeparture && (
+        <p className="text-sm text-amber-200">
+          Accepted possible shortfall at departure · estimated battery{' '}
+          {s.earlyDepartureEstimatePercent?.toFixed(1)}% · target{' '}
+          {s.targetPercent}%.
+        </p>
+      )}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-5">
         <div className="flex justify-between gap-4">
           <p className="text-slate-300">
@@ -112,6 +137,9 @@ export function ActiveSession() {
           />
         </div>
         <p className="text-xs text-slate-400">
+          {s.registrationMode === 'book_ahead' && !s.arrivalConfirmed
+            ? 'Current battery is your expected level on arrival. '
+            : ''}
           Your vehicle supports up to {s.maxChargeKw} kW AC. This is a limit,
           not your current charging rate. Charging losses are ignored.
         </p>

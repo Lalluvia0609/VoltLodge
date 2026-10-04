@@ -1,3 +1,4 @@
+import { guestLabel, guestDetails } from '../../utils/guestIdentity';
 import React from 'react';
 import { useSimulation } from '../../context/SimulationContext';
 import { formatTimeOnly, getMinutesDiff } from '../../utils/time';
@@ -6,8 +7,12 @@ import { Hourglass, Clock, Zap, Car, AlertCircle } from 'lucide-react';
 export const QueueManager: React.FC = () => {
   const { sessions, currentTimeIso, bays } = useSimulation();
 
-  const queuedSessions = sessions.filter((s) => s.status === 'waiting_bay').sort((a, b) => Date.parse(a.arrivalTime) - Date.parse(b.arrivalTime));
-  const vacantBayCount = bays.filter((b) => b.currentStatus === 'vacant').length;
+  const queuedSessions = sessions
+    .filter((s) => s.status === 'waiting_bay')
+    .sort((a, b) => Date.parse(a.arrivalTime) - Date.parse(b.arrivalTime));
+  const vacantBayCount = bays.filter(
+    (b) => b.currentStatus === 'vacant',
+  ).length;
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
@@ -27,13 +32,20 @@ export const QueueManager: React.FC = () => {
 
       {queuedSessions.length === 0 ? (
         <div className="py-8 text-center text-slate-500 text-xs">
-          No vehicles waiting in line. All arriving guests currently accommodated.
+          No vehicles waiting in line. All arriving guests currently
+          accommodated.
         </div>
       ) : (
         <div className="space-y-3">
           {queuedSessions.map((s, index) => {
-            const waitMins = Math.max(0, getMinutesDiff(s.arrivalTime, currentTimeIso));
-            const timeUntilDeparture = Math.max(0, getMinutesDiff(currentTimeIso, s.useByTime));
+            const waitMins = Math.max(
+              0,
+              getMinutesDiff(s.arrivalTime, currentTimeIso),
+            );
+            const timeUntilDeparture = Math.max(
+              0,
+              getMinutesDiff(currentTimeIso, s.agreedMoveByTime),
+            );
 
             return (
               <div
@@ -46,31 +58,37 @@ export const QueueManager: React.FC = () => {
                   </div>
                   <div>
                     <div className="font-mono text-sm font-bold text-white">
-                      {s.vehicleId}
+                      {guestLabel(s, sessions)}
                     </div>
                     <div className="text-slate-400 text-[11px]">
-                      {s.guestName} · Room {s.roomNumber}
+                      {guestDetails(s)}
                     </div>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-4">
                   <div>
-                    <span className="text-[10px] text-slate-500 uppercase block">Requested</span>
+                    <span className="text-[10px] text-slate-500 uppercase block">
+                      Requested
+                    </span>
                     <span className="font-mono font-bold text-emerald-400">
                       {s.targetKwh.toFixed(1)} kWh
                     </span>
                   </div>
 
                   <div>
-                    <span className="text-[10px] text-slate-500 uppercase block">Departure</span>
+                    <span className="text-[10px] text-slate-500 uppercase block">
+                      Move by
+                    </span>
                     <span className="font-mono font-bold text-amber-300">
-                      {formatTimeOnly(s.useByTime)}
+                      {formatTimeOnly(s.agreedMoveByTime)}
                     </span>
                   </div>
 
                   <div>
-                    <span className="text-[10px] text-slate-500 uppercase block">Queue Wait</span>
+                    <span className="text-[10px] text-slate-500 uppercase block">
+                      Queue Wait
+                    </span>
                     <span className="font-mono text-slate-300">
                       {waitMins}m
                     </span>
