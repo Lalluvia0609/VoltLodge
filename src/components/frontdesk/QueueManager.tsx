@@ -1,7 +1,11 @@
 import { guestLabel, guestDetails } from '../../utils/guestIdentity';
 import React from 'react';
 import { useSimulation } from '../../context/SimulationContext';
-import { formatTimeOnly, getMinutesDiff } from '../../utils/time';
+import {
+  formatTimeOnly,
+  getMinutesDiff,
+  formatDateTime,
+} from '../../utils/time';
 import { Hourglass, Clock, Zap, Car, AlertCircle } from 'lucide-react';
 
 export const QueueManager: React.FC = () => {
@@ -47,6 +51,14 @@ export const QueueManager: React.FC = () => {
               getMinutesDiff(currentTimeIso, s.agreedMoveByTime),
             );
 
+            const blockers =
+              vacantBayCount === 0
+                ? sessions.filter(
+                    (other) => other.bayId && other.requestId !== s.requestId,
+                  )
+                : [];
+            const arrived =
+              Date.parse(s.arrivalTime) <= Date.parse(currentTimeIso);
             return (
               <div
                 key={s.requestId}
@@ -62,6 +74,23 @@ export const QueueManager: React.FC = () => {
                     </div>
                     <div className="text-slate-400 text-[11px]">
                       {guestDetails(s)}
+                      <p>Scheduled: {formatDateTime(s.arrivalTime)}</p>
+                      <p className="text-amber-300">
+                        {arrived
+                          ? blockers.length
+                            ? 'Waiting — bay still occupied or reserved'
+                            : 'Waiting for bay assignment'
+                          : 'Scheduled — arrival pending'}
+                      </p>
+                      {blockers.map((other) => (
+                        <p key={other.requestId} className="text-amber-300">
+                          {bays.find((b) => b.bayId === other.bayId)?.name}:{' '}
+                          {guestLabel(other, sessions)} —{' '}
+                          {other.status === 'waiting_plugin'
+                            ? 'reserved'
+                            : 'still occupying bay'}
+                        </p>
+                      ))}
                     </div>
                   </div>
                 </div>

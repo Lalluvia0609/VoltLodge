@@ -36,6 +36,12 @@ import {
 } from '../utils/allocation';
 import { addMinutesToIso, formatDateTime, getMinutesDiff } from '../utils/time';
 
+import {
+  bookingPenalty,
+  occupiesBay,
+  DEFAULT_PENALTY_POLICY,
+} from '../utils/penalties';
+import type { PenaltyPolicy } from '../types';
 import { guestLabel } from '../utils/guestIdentity';
 import { getVehicleType, nextVehicleLabel } from '../data/vehicleTypes';
 import { completionRange, previewMove } from '../utils/booking';
@@ -147,8 +153,10 @@ function useSimulationState() {
     'Jordan Miller (Duty Manager)',
     'Sam Vance (Night Attendant)',
   ];
-  const idleGracePeriodMins = 15,
-    idleFeePerMin = 0.5;
+  const [penaltyPolicy, setPenaltyPolicyState] = useState<PenaltyPolicy>(
+    DEFAULT_PENALTY_POLICY,
+  );
+  const penaltyPolicyRef = useRef(penaltyPolicy);
   const refresh = useCallback((draft: DeskState) => {
     draft.bays = syncBays(draft.sessions, draft.bays);
     const powers = calculatePowerAllocation(
@@ -159,6 +167,11 @@ function useSimulationState() {
       draft.currentTimeIso,
     );
     draft.sessions.forEach((s) => {
+      s.penalty = bookingPenalty(
+        s,
+        draft.currentTimeIso,
+        penaltyPolicyRef.current,
+      );
       s.allocatedKw = powers.get(s.requestId) || 0;
       if (s.status === 'charging' || s.status === 'paused')
         s.status = s.allocatedKw > 0 ? 'charging' : 'paused';
@@ -183,6 +196,18 @@ function useSimulationState() {
     },
     [refresh],
   );
+  const setPenaltyPolicy = (policy: PenaltyPolicy): Result => {
+    if (
+      ![policy.ratePerMinute, policy.graceMinutes].every(
+        (value) => Number.isFinite(value) && value >= 0,
+      )
+    )
+      return failure('Enter non-negative penalty rate and grace period.');
+    penaltyPolicyRef.current = { ...policy };
+    setPenaltyPolicyState({ ...policy });
+    change(() => {});
+    return success;
+  };
   const loadPreset = useCallback(
     (id: string) => {
       const preset = ALL_PRESETS.find((p) => p.id === id);
@@ -677,11 +702,19 @@ function useSimulationState() {
     const actualMoveTime = hadBay
       ? s.moveReportedAt || draft.currentTimeIso
       : null;
-    const overstay = hadBay
-      ? Math.max(0, getMinutesDiff(s.agreedMoveByTime, draft.currentTimeIso))
-      : 0;
+    const penalty = bookingPenalty(
+      s,
+      draft.currentTimeIso,
+      penaltyPolicyRef.current,
+      hadBay
+        ? { actualMoveOutTime: actualMoveTime!, wasOccupied: true }
+        : undefined,
+    );
+    s.penalty = penalty;
+    const overstay = penalty.lateMinutes;
     const outcome = outcomeOf(s);
     draft.historyRecords.unshift({
+      penalty,
       id: crypto.randomUUID(),
       requestId: s.requestId,
       vehicleId: s.vehicleId,
@@ -711,8 +744,7 @@ function useSimulationState() {
       archivedAt: draft.currentTimeIso,
       scheduledMoveTime: s.agreedMoveByTime,
       overstayMinutes: overstay,
-      simulatedFeeCharged:
-        Math.max(0, overstay - idleGracePeriodMins) * idleFeePerMin,
+      simulatedFeeCharged: penalty.penaltyAmount,
       acceptedEarlyDeparture: !!s.acceptedEarlyDeparture,
       earlyDepartureDeficitKwh: s.acceptedEarlyDeparture
         ? remainingEnergy(s)
@@ -732,12 +764,13 @@ function useSimulationState() {
   const release = (draft: DeskState, bayId: string, notes?: string) => {
     const s = draft.sessions.find((s) => s.bayId === bayId && !s.bayReleasedAt);
     if (!s) return;
+    const wasOccupied = occupiesBay(s);
     s.bayId = null;
     s.bayReleasedAt = draft.currentTimeIso;
     s.allocatedKw = 0;
     if (remainingEnergy(s) > 1e-7 && s.status !== 'cancelled')
       s.status = 'ended_incomplete';
-    archive(draft, s, true, notes || 'Bay inspected and released.');
+    archive(draft, s, wasOccupied, notes || 'Bay inspected and released.');
     reserveQueue(draft.sessions, draft.bays, draft.currentTimeIso);
     event(
       draft,
@@ -753,11 +786,7 @@ function useSimulationState() {
     change((d) => {
       const s = d.sessions.find((s) => s.requestId === id);
       if (s) {
-        const occupied =
-          !!s.bayId &&
-          (!!s.pluggedInAt ||
-            !!s.moveReportedAt ||
-            ['charging', 'paused'].includes(s.status));
+        const occupied = occupiesBay(s);
         s.status = 'cancelled';
         s.chargingStoppedAt = d.currentTimeIso;
         s.allocatedKw = 0;
@@ -1052,8 +1081,8 @@ function useSimulationState() {
       12 -
       state.sessions.filter((s) => s.valetTask?.status === 'completed').length -
       state.historyRecords.filter((record) => record.valetUsed).length,
-    idleGracePeriodMins,
-    idleFeePerMin,
+    penaltyPolicy,
+    setPenaltyPolicy,
     extensionLimitMinutes,
     setExtensionLimitMinutes,
     predictions,

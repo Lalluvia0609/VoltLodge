@@ -54,10 +54,7 @@ export const Header: React.FC = () => {
     (s) => s.valetTask?.status === 'pending_review',
   ).length;
   const overdueBayCount = sessions.filter(
-    (s) =>
-      s.status === 'target_reached' &&
-      s.bayId &&
-      currentTimeIso > s.agreedMoveByTime,
+    (s) => s.bayId && (s.penalty?.lateMinutes || 0) > 0,
   ).length;
   const pendingExtCount = sessions.filter(
     (s) => s.extensionRequest?.status === 'pending',

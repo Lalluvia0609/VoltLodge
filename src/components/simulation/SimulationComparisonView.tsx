@@ -245,7 +245,7 @@ export function SimulationComparisonView() {
             <p className="text-xs text-slate-400">
               {DEFAULT_POLICIES[i].allocationAlgorithm === 'equal_sharing'
                 ? 'Capped equal sharing'
-                : 'Equal sharing with deadline protection'}
+                : 'Deadline-based adaptive sharing'}
             </p>
             <p className="text-2xl font-mono text-emerald-300">
               {r.targetSuccessRatePercent.toFixed(1)}% target reached

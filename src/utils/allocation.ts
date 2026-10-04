@@ -8,6 +8,9 @@ import type {
 import { addMinutesToIso } from './time';
 
 const EPS = 1e-7;
+// Flow feasibility needs a tighter tolerance than display/completion rounding:
+// otherwise tiny deadline deficits turn into avoidable power transfers.
+const FLOW_EPS = 1e-10;
 const ms = (iso: string) => Date.parse(iso);
 const iso = (time: number) => new Date(time).toISOString();
 export const remainingEnergy = (s: ChargingSession) =>
@@ -90,10 +93,11 @@ interface Edge {
 
 // Fractional AC charging is a capacitated scheduling problem. Interval max-flow
 // checks every deadline, vehicle cap and shared site limit, including future jobs.
-function schedule(jobs: Job[], budget: number, now: number) {
+function schedule(jobs: Job[], budget: number, now: number, firstEnd?: number) {
   const boundaries = [
     ...new Set([
       now,
+      ...(firstEnd && firstEnd > now ? [firstEnd] : []),
       ...jobs
         .flatMap((j) => [Math.max(now, j.start), j.deadline])
         .filter((t) => t > now),
@@ -148,7 +152,7 @@ function schedule(jobs: Job[], budget: number, now: number) {
     for (let q = 0; q < queue.length && !parent[sink]; q++) {
       const v = queue[q];
       graph[v].forEach((e, i) => {
-        if (e.capacity > EPS && !parent[e.to]) {
+        if (e.capacity > FLOW_EPS && !parent[e.to]) {
           parent[e.to] = [v, i];
           queue.push(e.to);
         }
@@ -174,7 +178,7 @@ function schedule(jobs: Job[], budget: number, now: number) {
   );
   const hours = intervals.length ? (intervals[0].end - now) / 3600000 : 0;
   return {
-    feasible: [...deficits.values()].every((d) => d < EPS),
+    feasible: [...deficits.values()].every((d) => d < FLOW_EPS),
     deficits,
     power: new Map(
       jobs.map((j) => {
@@ -267,31 +271,98 @@ function allocateJobs(
   const result = new Map(jobs.map((j) => [j.id, 0]));
   ready.forEach((j, i) => result.set(j.id, equal[i]));
   if (algorithm === 'equal_sharing' || !ready.length) return result;
-  // Keep one minute of capped equal sharing whenever it preserves every promise.
+  // Average power to the latest accepted cutoff is the baseline. Extra
+  // capacity follows remaining energy, so nearly-finished cars do not absorb
+  // whole chargers while other cars wait. Recheck the whole future schedule.
   const next = Math.min(
     now + 60000,
     ...jobs.flatMap((j) => [j.start, j.deadline]).filter((t) => t > now),
-    ...ready.map((j, i) =>
-      equal[i] > EPS ? now + (j.energy / equal[i]) * 3600000 : Infinity,
-    ),
   );
-  const residual = jobs.map((j) => ({
-    ...j,
-    energy: Math.max(
-      0,
-      j.energy - ((result.get(j.id) || 0) * (next - now)) / 3600000,
-    ),
-  }));
-  if (
+  const hours = (next - now) / 3600000;
+  const caps = ready.map((j) => Math.min(j.cap, j.energy / hours));
+  const needs = ready.map((j, i) =>
+    Math.min(caps[i], j.energy / ((j.deadline - now) / 3600000)),
+  );
+  const sum = (values: number[]) => values.reduce((n, value) => n + value, 0);
+  const scale = Math.min(1, Math.max(0, budget) / Math.max(EPS, sum(needs)));
+  const desired = needs.map((value) => value * scale);
+  let spare = Math.max(0, budget - sum(desired));
+  let pool = ready.map((_, i) => i).filter((i) => caps[i] - desired[i] > EPS);
+  while (pool.length && spare > EPS) {
+    const weight = pool.reduce((n, i) => n + ready[i].energy, 0);
+    let used = 0;
+    for (const i of pool) {
+      const extra = Math.min(
+        caps[i] - desired[i],
+        (spare * ready[i].energy) / weight,
+      );
+      desired[i] += extra;
+      used += extra;
+    }
+    spare -= used;
+    pool = pool.filter((i) => caps[i] - desired[i] > EPS);
+    if (used <= EPS) break;
+  }
+  const feasible = (values: number[]) =>
     schedule(
-      residual.filter((j) => j.energy > EPS),
+      jobs
+        .map((j) => ({
+          ...j,
+          energy: Math.max(
+            0,
+            j.energy -
+              (values[ready.findIndex((r) => r.id === j.id)] || 0) * hours,
+          ),
+        }))
+        .filter((j) => j.energy > EPS),
       budget,
       next,
-    ).feasible
-  )
+    ).feasible;
+  const assign = (values: number[]) => {
+    ready.forEach((j, i) =>
+      result.set(j.id, Math.max(0, Math.min(caps[i], values[i]))),
+    );
     return result;
-  const protectedPlan = schedule(jobs, budget, now);
-  if (protectedPlan.feasible) return protectedPlan.power;
+  };
+  if (feasible(desired)) return assign(desired);
+  const protectedPlan = schedule(jobs, budget, now, next);
+  if (protectedPlan.feasible) {
+    // Flow provides a feasible seed, never the final live allocation. Move
+    // power from above-preference donors to below-preference recipients as
+    // far as deadline feasibility permits; tight mandatory demand stays put.
+    const values = ready.map((j) => protectedPlan.power.get(j.id) || 0);
+    for (const i of ready
+      .map((_, i) => i)
+      .sort((a, b) => desired[b] - values[b] - (desired[a] - values[a]))) {
+      const extra = Math.min(
+        desired[i] - values[i],
+        Math.max(0, budget - sum(values)),
+      );
+      if (extra > EPS) values[i] += extra;
+      for (const donor of ready
+        .map((_, k) => k)
+        .sort((a, b) => values[b] - desired[b] - (values[a] - desired[a]))) {
+        const max = Math.min(
+          desired[i] - values[i],
+          values[donor] - desired[donor],
+        );
+        if (donor === i || max <= EPS) continue;
+        let low = 0,
+          high = max;
+        for (let step = 0; step < 26; step++) {
+          const amount = (low + high) / 2;
+          const trial = [...values];
+          trial[i] += amount;
+          trial[donor] -= amount;
+          if (feasible(trial)) low = amount;
+          else high = amount;
+        }
+        values[i] += low;
+        values[donor] -= low;
+      }
+    }
+    return assign(values);
+  }
   // Infeasible benchmark scenarios: best effort earliest-deadline allocation;
   // admission control prevents introducing this condition in the guest workflow.
   let left = Math.max(0, budget);

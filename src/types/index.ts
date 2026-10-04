@@ -38,7 +38,22 @@ export interface VehicleRequestInput {
   moveMethod: 'self' | 'valet';
 }
 
+export interface PenaltyPolicy {
+  ratePerMinute: number;
+  graceMinutes: number;
+}
+export interface PenaltyRecord {
+  agreedMoveBy: string;
+  actualMoveOutTime: string | null;
+  lateMinutes: number;
+  penaltyAmount: number;
+  penaltyStatus: 'none' | 'accruing' | 'final';
+  penaltyReason: string;
+  ratePerMinute: number;
+  graceMinutes: number;
+}
 export interface ChargingSession {
+  penalty?: PenaltyRecord;
   vehicleType?: VehicleTypeId; // Custom engineering scenarios can use independent parameters.
   requestId: string;
   vehicleId: string;
@@ -148,6 +163,7 @@ export interface SystemEvent {
 }
 
 export interface HistoryRecord {
+  penalty: PenaltyRecord;
   vehicleType?: VehicleTypeId;
   targetPercent: number;
   actualPercent: number;
