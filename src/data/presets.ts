@@ -30,7 +30,7 @@ export const DEFAULT_POLICIES: SimulationPolicyConfig[] = [
     name: 'Policy C: Adaptive Deadline-Protected Sharing (No Bay Management)',
     shortName: 'Adaptive / No Turnover',
     description:
-      'Capped equal sharing when feasible, otherwise reallocating power to protect deadlines; no proactive move management.',
+      'Deadline-based minimum power with spare capacity shared across remaining demand; no proactive move management.',
     allocationAlgorithm: 'demand_urgency',
     enableMoveManagement: false,
     color: '#3b82f6', // Blue

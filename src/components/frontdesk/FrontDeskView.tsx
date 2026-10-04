@@ -1,3 +1,4 @@
+import { PenaltySummary } from './PenaltySummary';
 import { formatTimeOnly } from '../../utils/time';
 import React, { useState } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
@@ -236,6 +237,7 @@ export const FrontDeskView: React.FC = () => {
         </div>
       </div>
 
+      <PenaltySummary />
       {/* Navigation Sub-Tabs */}
       <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
         <button
