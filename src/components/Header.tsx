@@ -1,3 +1,4 @@
+import { guestLabel, vehicleTypeLabel } from '../utils/guestIdentity';
 import React from 'react';
 import { useSimulation } from '../context/SimulationContext';
 import { formatTimeOnly, formatDateTime } from '../utils/time';
@@ -287,7 +288,7 @@ export const Header: React.FC = () => {
               >
                 {sessions.map((s) => (
                   <option key={s.requestId} value={s.requestId}>
-                    {s.vehicleId} ({s.guestName}) -{' '}
+                    {guestLabel(s, sessions)} · {vehicleTypeLabel(s)} -{' '}
                     {s.status.replace('_', ' ').toUpperCase()}
                   </option>
                 ))}

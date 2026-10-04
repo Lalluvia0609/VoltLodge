@@ -13,6 +13,7 @@ import type {
   HistoryRecord,
   AllocationAlgorithm,
   VehicleRequestInput,
+  VehicleTypeId,
 } from '../types';
 import {
   ALL_PRESETS,
@@ -26,11 +27,18 @@ import {
   reserveQueue,
   predictCharging,
   validateSchedule,
+  deadlineOf,
   remainingEnergy,
+  remainingCommitted,
+  outcomeOf,
   type EngineState,
   type ChargingPrediction,
 } from '../utils/allocation';
 import { addMinutesToIso, formatDateTime, getMinutesDiff } from '../utils/time';
+
+import { guestLabel } from '../utils/guestIdentity';
+import { getVehicleType, nextVehicleLabel } from '../data/vehicleTypes';
+import { completionRange, previewMove } from '../utils/booking';
 
 type Result = { success: boolean; requestId?: string; error?: string };
 const success: Result = { success: true };
@@ -44,18 +52,17 @@ function initialState(preset: SimulationPreset): DeskState {
   const sessions = structuredClone(preset.sessions).map((s) => ({
     ...s,
     arrivalTime: new Date(s.arrivalTime).toISOString(),
-    useByTime: new Date(s.useByTime).toISOString(),
     agreedMoveByTime: new Date(s.agreedMoveByTime).toISOString(),
     targetPercent:
       s.initialSocPercent + (s.targetKwh / s.batteryCapacityKwh) * 100,
-    originalLatestFinishTime: new Date(
-      Math.min(time(s.plannedLatestFinishTime), time(s.useByTime)),
-    ).toISOString(),
+    originalLatestFinishTime:
+      s.originalLatestFinishTime ||
+      new Date(s.plannedLatestFinishTime).toISOString(),
     chargingDeadline: new Date(
-      Math.min(time(s.plannedLatestFinishTime), time(s.useByTime)),
+      s.chargingDeadline || s.plannedLatestFinishTime,
     ).toISOString(),
-    completionWindowStart: new Date(s.estimatedFinishTime).toISOString(),
-    completionWindowEnd: new Date(s.plannedLatestFinishTime).toISOString(),
+    completionWindowStart: '',
+    completionWindowEnd: '',
     moveReportedAt: null,
     ...(time(s.arrivalTime) > time(preset.simulationStartIso)
       ? { status: 'waiting_bay' as const, bayId: null, allocatedKw: 0 }
@@ -71,6 +78,19 @@ function initialState(preset: SimulationPreset): DeskState {
     currentRequestId: null,
     allocatedKw: 0,
   }));
+  // Preset timestamps define scenario commitments, never displayed predictions.
+  for (const s of sessions) {
+    const forecast = predictCharging(
+      s,
+      sessions,
+      bays,
+      preset.sitePowerBudgetKw,
+      'demand_urgency',
+      new Date(preset.simulationStartIso).toISOString(),
+    );
+    s.completionWindowStart = forecast.fastest || '';
+    s.completionWindowEnd = forecast.fullLoad || '';
+  }
   return {
     sessions,
     bays: syncBays(sessions, bays),
@@ -146,6 +166,14 @@ function useSimulationState() {
     draft.bays = syncBays(draft.sessions, draft.bays);
     stateRef.current = draft;
     setState(draft);
+    setActiveRequestId((current) =>
+      current && !draft.sessions.some((s) => s.requestId === current)
+        ? (
+            draft.sessions.find((s) => s.status !== 'pending_confirmation') ||
+            draft.sessions[0]
+          )?.requestId || null
+        : current,
+    );
   }, []);
   const change = useCallback(
     (fn: (draft: DeskState) => void) => {
@@ -201,7 +229,9 @@ function useSimulationState() {
         )
           event(
             draft,
-            `${s.vehicleId}: charging stopped at deadline; ${remainingEnergy(s).toFixed(1)} kWh still needed.`,
+            s.acceptedEarlyDeparture && remainingCommitted(s) < 1e-7
+              ? `${guestLabel(s, draft.sessions)}: Guest accepted early departure. Target gap: ${remainingEnergy(s).toFixed(1)} kWh.`
+              : `${guestLabel(s, draft.sessions)}: Charging deadline missed; ${remainingEnergy(s).toFixed(1)} kWh still needed.`,
             'charging',
             'alert',
             s,
@@ -209,7 +239,7 @@ function useSimulationState() {
         if (s.status === 'waiting_plugin' && old?.status !== 'waiting_plugin')
           event(
             draft,
-            `${s.vehicleId}: your bay is reserved. Please park and plug in; staff will confirm.`,
+            `${guestLabel(s, draft.sessions)}: your bay is reserved. Please park and plug in; staff will confirm.`,
             'queue',
             'info',
             s,
@@ -311,25 +341,11 @@ function useSimulationState() {
     return success;
   };
   const submitRequest = (input: VehicleRequestInput): Result => {
-    const {
-      batteryCapacityKwh: capacity,
-      currentPercent: current,
-      targetPercent: target,
-      maxChargeKw: ac,
-    } = input;
-    if (!input.vehicleId.trim())
-      return failure('Enter your vehicle registration.');
-    if (
-      !Number.isFinite(capacity) ||
-      !capacity ||
-      capacity <= 0 ||
-      !Number.isFinite(ac) ||
-      !ac ||
-      ac <= 0
-    )
-      return failure(
-        'Enter valid usable capacity and maximum AC charging power.',
-      );
+    const type = getVehicleType(input.vehicleType);
+    if (!type)
+      return failure('Choose one of the four simulated vehicle types.');
+    const { batteryCapacityKwh: capacity, maxChargeKw: ac } = type;
+    const { currentPercent: current, targetPercent: target } = input;
     if (
       !Number.isFinite(current) ||
       !Number.isFinite(target) ||
@@ -341,33 +357,35 @@ function useSimulationState() {
         'Choose a target above your current battery level, up to 100%.',
       );
     const now = stateRef.current.currentTimeIso;
+    const mode = input.registrationMode || 'register_now';
+    const arrival = mode === 'book_ahead' ? input.arrivalTime || '' : now;
     if (
-      !Number.isFinite(time(input.useByTime)) ||
-      time(input.useByTime) <= time(now)
+      !Number.isFinite(time(arrival)) ||
+      (mode === 'book_ahead' && time(arrival) <= time(now))
     )
-      return failure('Choose a future time when you need your car.');
-    if (
-      stateRef.current.sessions.some(
-        (s) =>
-          s.vehicleId === input.vehicleId.trim().toUpperCase() &&
-          !s.bayReleasedAt &&
-          s.status !== 'pending_confirmation',
-      )
-    )
-      return failure('This vehicle already has an active plan.');
+      return failure('Choose a future arrival date and time.');
     const s: ChargingSession = {
       requestId: crypto.randomUUID(),
-      vehicleId: input.vehicleId.trim().toUpperCase(),
-      guestName: input.guestName.trim() || 'Hotel Guest',
+      vehicleId: nextVehicleLabel(
+        [
+          ...stateRef.current.sessions,
+          ...stateRef.current.historyRecords.map((record) => record.session),
+        ]
+          .filter((s) => s.status !== 'pending_confirmation')
+          .map((s) => s.vehicleId),
+      ),
+      vehicleType: type.id,
+      guestName: input.guestName.trim(),
       roomNumber: input.roomNumber.trim(),
       batteryCapacityKwh: capacity,
       initialSocPercent: current!,
       targetPercent: target!,
       targetKwh: (capacity * (target! - current!)) / 100,
       maxChargeKw: ac,
-      arrivalTime: now,
-      useByTime: new Date(input.useByTime).toISOString(),
-      agreedMoveByTime: input.useByTime,
+      arrivalTime: new Date(arrival).toISOString(),
+      registrationMode: mode,
+      arrivalConfirmed: mode === 'register_now',
+      agreedMoveByTime: '',
       moveMethod: input.moveMethod || 'self',
       estimatedStartTime: now,
       estimatedFinishTime: '',
@@ -390,16 +408,9 @@ function useSimulationState() {
     };
     // Pending plans never consume power or reserve bays. Generate tentative
     // full-load bounds and revalidate against the live state at confirmation.
-    const tentative = { ...s, status: 'waiting_bay' as const };
-    const cars = [
-      ...stateRef.current.sessions.filter(
-        (x) => x.status !== 'pending_confirmation',
-      ),
-      tentative,
-    ];
-    const prediction = predictCharging(
-      tentative,
-      cars,
+    const prediction = completionRange(
+      s,
+      stateRef.current.sessions,
       stateRef.current.bays,
       budgetRef.current,
       algorithmRef.current,
@@ -408,18 +419,16 @@ function useSimulationState() {
     s.completionWindowStart = prediction.fastest || '';
     s.completionWindowEnd = prediction.fullLoad || '';
     s.estimatedStartTime =
-      prediction.waitMinutes !== null
-        ? addMinutesToIso(now, prediction.waitMinutes)
+      prediction.fastest && prediction.fastestMinutes !== null
+        ? addMinutesToIso(prediction.fastest, -prediction.fastestMinutes)
         : '';
     s.estimatedFinishTime = prediction.expected || '';
     s.plannedLatestFinishTime = prediction.fullLoad || '';
     s.originalLatestFinishTime = prediction.fullLoad || '';
     s.chargingDeadline = prediction.fullLoad || '';
-    s.agreedMoveByTime = prediction.fullLoad || input.useByTime;
-    s.isFeasibleOnTime =
-      prediction.feasible &&
-      !!prediction.fullLoad &&
-      time(prediction.fullLoad) <= time(s.useByTime);
+    // A suggested move time is shown only after the range has been generated.
+    s.agreedMoveByTime = prediction.fullLoad || '';
+    s.isFeasibleOnTime = prediction.feasible;
     s.projectedDeficitKwh = prediction.deficitKwh;
     change((d) => {
       d.sessions = d.sessions.filter(
@@ -430,53 +439,170 @@ function useSimulationState() {
     setActiveRequestId(s.requestId);
     return { success: true, requestId: s.requestId };
   };
+  const getMovePreview = (
+    id: string,
+    moveTime: string,
+    targetPercent?: number,
+    vehicleType?: VehicleTypeId,
+  ) => {
+    const old = stateRef.current.sessions.find((s) => s.requestId === id);
+    if (!old) return null;
+    const s = structuredClone(old);
+    if (vehicleType !== undefined) {
+      const type = getVehicleType(vehicleType);
+      if (!type) return null;
+      s.vehicleType = type.id;
+      s.batteryCapacityKwh = type.batteryCapacityKwh;
+      s.maxChargeKw = type.maxChargeKw;
+    }
+    if (targetPercent !== undefined) {
+      s.targetPercent = targetPercent;
+      s.targetKwh = Math.max(
+        0,
+        (s.batteryCapacityKwh * (targetPercent - s.initialSocPercent)) / 100,
+      );
+    }
+    if (['target_reached', 'ended_incomplete', 'cancelled'].includes(s.status))
+      s.status = s.bayId
+        ? s.pluggedInAt
+          ? 'charging'
+          : 'waiting_plugin'
+        : 'waiting_bay';
+    return previewMove(
+      s,
+      moveTime,
+      stateRef.current.sessions,
+      stateRef.current.bays,
+      budgetRef.current,
+      algorithmRef.current,
+      stateRef.current.currentTimeIso,
+      extensionLimitMinutes,
+    );
+  };
   const confirmPlan = (
     requestId: string,
     moveTime: string,
-    _acceptedDeficit = false,
+    acceptedDeficit = false,
+    moveMethod: 'self' | 'valet' = 'self',
   ): Result => {
     const draft = structuredClone(stateRef.current),
       s = draft.sessions.find((s) => s.requestId === requestId);
     if (!s || s.status !== 'pending_confirmation')
       return failure('Generate a new plan first.');
-    if (
-      !s.originalLatestFinishTime ||
-      time(s.originalLatestFinishTime) > time(s.useByTime) ||
-      !Number.isFinite(time(moveTime)) ||
-      time(moveTime) > time(s.useByTime) ||
-      time(moveTime) <= time(draft.currentTimeIso)
-    )
-      return failure('Choose a valid move time before you need your car.');
-    s.agreedMoveByTime = new Date(moveTime).toISOString();
-    s.status = 'waiting_bay';
-    // Check the current queue and all existing promises, not only this car.
-    if (!validate(draft.sessions))
+    const preview = getMovePreview(requestId, moveTime);
+    if (!preview?.valid)
+      return failure(preview?.error || 'Unable to confirm this plan.');
+    if (preview.requiresAcceptance && !acceptedDeficit)
       return failure(
-        'This plan cannot meet all confirmed deadlines. Choose a later use-by time or a lower target.',
+        `Please explicitly accept the estimated ${preview.expectedPercent.toFixed(1)}% battery before confirming early departure.`,
       );
-    const predicted = predictCharging(
-      s,
-      draft.sessions,
-      draft.bays,
-      budgetRef.current,
-      algorithmRef.current,
-      draft.currentTimeIso,
-    );
-    if (
-      !predicted.expected ||
-      time(predicted.expected) >
-        Math.min(time(moveTime), time(s.chargingDeadline!))
-    )
-      return failure(
-        'We cannot finish before this move time. Choose a later time or lower target.',
-      );
+    Object.assign(s, preview.candidate);
+    s.moveMethod = moveMethod;
+    s.earlyDepartureEstimatePercent = preview.expectedPercent;
+    if (s.committedKwh === s.deliveredKwh && s.arrivalConfirmed)
+      s.commitmentReachedAt = draft.currentTimeIso;
     reserveQueue(draft.sessions, draft.bays, draft.currentTimeIso);
+    if (moveMethod === 'valet')
+      s.valetTask = {
+        taskId: crypto.randomUUID(),
+        requestId: s.requestId,
+        vehicleId: s.vehicleId,
+        bayId: s.bayId || '',
+        requestedAt: draft.currentTimeIso,
+        status: 'pending_review',
+        authorizationConfirmed: true,
+        keysHandoverNote:
+          'Please confirm key handover with reception on arrival.',
+        keysReceived: false,
+        staffAssigned: null,
+        destinationBay: null,
+      };
     event(
       draft,
-      s.bayId
-        ? 'Your bay is reserved. Park and plug in, then ask reception to confirm.'
-        : 'Your plan is confirmed. We will invite you when a bay is available.',
+      s.registrationMode === 'book_ahead'
+        ? 'Booking confirmed. Confirm your actual battery when you arrive.'
+        : 'Plan confirmed. Reception will confirm your bay and plug-in.',
       'queue',
+      'success',
+      s,
+    );
+    refresh(draft);
+    return success;
+  };
+  const getArrivalPreview = (
+    id: string,
+    actualPercent: number,
+    targetPercent?: number,
+  ) => {
+    const old = stateRef.current.sessions.find((s) => s.requestId === id);
+    if (!old) return null;
+    if (
+      !Number.isFinite(actualPercent) ||
+      actualPercent < 0 ||
+      actualPercent > 100
+    )
+      return null;
+    const target = targetPercent ?? old.targetPercent;
+    if (!Number.isFinite(target) || target < 0 || target > 100) return null;
+    const s = {
+      ...structuredClone(old),
+      initialSocPercent: actualPercent,
+      targetPercent: target,
+      targetKwh: Math.max(
+        0,
+        (old.batteryCapacityKwh * (target - actualPercent)) / 100,
+      ),
+      deliveredKwh: 0,
+      arrivalConfirmed: true,
+    };
+    return previewMove(
+      s,
+      s.agreedMoveByTime,
+      stateRef.current.sessions,
+      stateRef.current.bays,
+      budgetRef.current,
+      algorithmRef.current,
+      stateRef.current.currentTimeIso,
+      extensionLimitMinutes,
+    );
+  };
+  const confirmArrival = (
+    id: string,
+    actualPercent: number,
+    acceptedDeficit = false,
+    targetPercent?: number,
+  ): Result => {
+    const draft = structuredClone(stateRef.current),
+      s = draft.sessions.find((s) => s.requestId === id);
+    if (!s || s.registrationMode !== 'book_ahead' || s.arrivalConfirmed)
+      return failure('No booking awaiting arrival confirmation.');
+    if (time(draft.currentTimeIso) < time(s.arrivalTime))
+      return failure(
+        'Arrival cannot be confirmed before your booked arrival time.',
+      );
+    const preview = getArrivalPreview(id, actualPercent, targetPercent);
+    if (!preview?.valid)
+      return failure(
+        preview?.error || 'Enter an actual battery percentage from 0 to 100.',
+      );
+    if (preview.requiresAcceptance && !acceptedDeficit)
+      return failure(
+        'Your actual battery changes the arrangement. Accept the reduced charge, lower your target or explicitly request a later time.',
+      );
+    Object.assign(s, preview.candidate);
+    s.arrivalConfirmed = true;
+    s.earlyDepartureEstimatePercent = preview.expectedPercent;
+    s.commitmentReachedAt =
+      remainingCommitted(s) < 1e-7 ? draft.currentTimeIso : null;
+    s.targetReachedAt = remainingEnergy(s) < 1e-7 ? draft.currentTimeIso : null;
+    reserveQueue(draft.sessions, draft.bays, draft.currentTimeIso);
+    if (remainingCommitted(s) < 1e-7 && s.bayId)
+      s.status =
+        remainingEnergy(s) < 1e-7 ? 'target_reached' : 'ended_incomplete';
+    event(
+      draft,
+      'Actual battery confirmed. Your original deadline has not been extended.',
+      'charging',
       'success',
       s,
     );
@@ -496,13 +622,23 @@ function useSimulationState() {
       );
     if (!s)
       return failure('This vehicle does not have a reservation for this bay.');
+    if (s.arrivalConfirmed === false)
+      return failure(
+        'Confirm the actual arrival battery before starting charging.',
+      );
     if (!validate(draft.sessions))
       return failure(
         'Please revise the plan: the delayed arrival can no longer meet the confirmed deadlines.',
       );
     s.status = 'charging';
     s.pluggedInAt = draft.currentTimeIso;
-    event(draft, `${vehicleId} parked and plugged in.`, 'bay', 'success', s);
+    event(
+      draft,
+      `${guestLabel(s, draft.sessions)} parked and plugged in.`,
+      'bay',
+      'success',
+      s,
+    );
     refresh(draft);
     return success;
   };
@@ -511,8 +647,15 @@ function useSimulationState() {
       const s = d.sessions.find((s) => s.requestId === requestId);
       if (s?.bayId) {
         s.moveReportedAt = d.currentTimeIso;
+        if (remainingEnergy(s) > 1e-7) s.chargingStoppedAt ||= d.currentTimeIso;
         s.allocatedKw = 0;
-        if (remainingEnergy(s) > 1e-7) s.status = 'cancelled';
+        if (remainingEnergy(s) > 1e-7) {
+          s.status = 'cancelled';
+          s.acceptedEarlyDeparture = true;
+          s.guestAcceptedDeficit = true;
+          s.committedKwh = s.deliveredKwh;
+          s.commitmentReachedAt = d.currentTimeIso;
+        }
         event(
           d,
           'Move reported. Waiting for reception to confirm the bay is clear.',
@@ -522,46 +665,83 @@ function useSimulationState() {
         );
       }
     });
-  const release = (draft: DeskState, bayId: string, notes?: string) => {
-    const s = draft.sessions.find((s) => s.bayId === bayId && !s.bayReleasedAt);
-    if (!s) return;
-    s.bayId = null;
-    s.bayReleasedAt = draft.currentTimeIso;
+  const archive = (
+    draft: DeskState,
+    s: ChargingSession,
+    hadBay: boolean,
+    notes: string,
+  ) => {
+    if (draft.historyRecords.some((record) => record.requestId === s.requestId))
+      return;
     s.allocatedKw = 0;
-    s.moveReportedAt = null;
-    if (remainingEnergy(s) > 1e-7 && s.status !== 'cancelled')
-      s.status = 'ended_incomplete';
-    const overstay = Math.max(
-      0,
-      getMinutesDiff(s.agreedMoveByTime, draft.currentTimeIso),
-    );
+    const actualMoveTime = hadBay
+      ? s.moveReportedAt || draft.currentTimeIso
+      : null;
+    const overstay = hadBay
+      ? Math.max(0, getMinutesDiff(s.agreedMoveByTime, draft.currentTimeIso))
+      : 0;
+    const outcome = outcomeOf(s);
     draft.historyRecords.unshift({
       id: crypto.randomUUID(),
       requestId: s.requestId,
       vehicleId: s.vehicleId,
+      vehicleType: s.vehicleType,
       guestName: s.guestName,
       roomNumber: s.roomNumber,
       arrivalTime: s.arrivalTime,
       departureTime: draft.currentTimeIso,
       targetKwh: s.targetKwh,
       actualDeliveredKwh: s.deliveredKwh,
-      targetAchieved: remainingEnergy(s) < 1e-7,
+      targetPercent: s.targetPercent,
+      actualPercent: Math.min(
+        100,
+        s.initialSocPercent + (s.deliveredKwh / s.batteryCapacityKwh) * 100,
+      ),
+      targetAchieved: outcome.targetAchieved,
       onTimeCompletion:
-        !!s.targetReachedAt &&
-        time(s.targetReachedAt) <=
-          Math.min(time(s.chargingDeadline || s.useByTime), time(s.useByTime)),
-      scheduledMoveTime: s.agreedMoveByTime,
+        !!s.targetReachedAt && time(s.targetReachedAt) <= deadlineOf(s),
+      chargingStartedAt: s.pluggedInAt,
+      chargingCompletedAt: s.targetReachedAt,
+      chargingStoppedAt:
+        s.chargingStoppedAt ||
+        s.targetReachedAt ||
+        (s.pluggedInAt ? draft.currentTimeIso : null),
+      actualMoveTime,
       actualReleaseTime: draft.currentTimeIso,
+      archivedAt: draft.currentTimeIso,
+      scheduledMoveTime: s.agreedMoveByTime,
       overstayMinutes: overstay,
       simulatedFeeCharged:
         Math.max(0, overstay - idleGracePeriodMins) * idleFeePerMin,
+      acceptedEarlyDeparture: !!s.acceptedEarlyDeparture,
+      earlyDepartureDeficitKwh: s.acceptedEarlyDeparture
+        ? remainingEnergy(s)
+        : 0,
       valetUsed: s.valetTask?.status === 'completed',
-      notes: notes || 'Bay inspected and released.',
+      valetTask: s.valetTask ? structuredClone(s.valetTask) : undefined,
+      commitmentFulfilled: outcome.commitmentFulfilled,
+      outcomeReason: outcome.outcomeReason,
+      notes,
+      hadBay,
+      session: structuredClone(s),
     });
+    draft.sessions = draft.sessions.filter(
+      (car) => car.requestId !== s.requestId,
+    );
+  };
+  const release = (draft: DeskState, bayId: string, notes?: string) => {
+    const s = draft.sessions.find((s) => s.bayId === bayId && !s.bayReleasedAt);
+    if (!s) return;
+    s.bayId = null;
+    s.bayReleasedAt = draft.currentTimeIso;
+    s.allocatedKw = 0;
+    if (remainingEnergy(s) > 1e-7 && s.status !== 'cancelled')
+      s.status = 'ended_incomplete';
+    archive(draft, s, true, notes || 'Bay inspected and released.');
     reserveQueue(draft.sessions, draft.bays, draft.currentTimeIso);
     event(
       draft,
-      `Bay released. The next waiting vehicle is invited to park; charging waits for plug-in confirmation.`,
+      'Bay confirmed clear. Vehicle archived to History; the next driver must park and plug in before charging.',
       'bay',
       'success',
       s,
@@ -573,29 +753,57 @@ function useSimulationState() {
     change((d) => {
       const s = d.sessions.find((s) => s.requestId === id);
       if (s) {
+        const occupied =
+          !!s.bayId &&
+          (!!s.pluggedInAt ||
+            !!s.moveReportedAt ||
+            ['charging', 'paused'].includes(s.status));
         s.status = 'cancelled';
+        s.chargingStoppedAt = d.currentTimeIso;
         s.allocatedKw = 0;
+        if (remainingEnergy(s) > 1e-7) {
+          s.acceptedEarlyDeparture = true;
+          s.guestAcceptedDeficit = true;
+          s.committedKwh = s.deliveredKwh;
+          s.commitmentReachedAt = d.currentTimeIso;
+        }
         event(
           d,
-          'Charging stopped. Your bay remains occupied until reception confirms you have moved.',
+          occupied
+            ? 'Charging stopped. Your bay remains occupied until reception confirms you have moved.'
+            : 'Booking cancelled and archived to History; no bay was occupied.',
           'charging',
           'info',
           s,
         );
+        if (!occupied) {
+          s.bayId = null;
+          archive(d, s, false, 'Booking cancelled before occupying a bay.');
+          reserveQueue(d.sessions, d.bays, d.currentTimeIso);
+        }
       }
     });
   const modifyRequest = (
     id: string,
     targetPercent: number,
-    newUseByTime: string,
-    maxChargeKw?: number,
+    vehicleType?: VehicleTypeId,
     moveTime?: string,
+    acceptedDeficit = false,
   ): Result => {
     const draft = structuredClone(stateRef.current),
       s = draft.sessions.find((s) => s.requestId === id);
     if (!s || s.bayReleasedAt) return failure('This charging plan has ended.');
-    const current =
-      s.initialSocPercent + (s.deliveredKwh / s.batteryCapacityKwh) * 100;
+    if (vehicleType !== undefined && !getVehicleType(vehicleType))
+      return failure('Choose one of the four simulated vehicle types.');
+    const preview = getMovePreview(
+      id,
+      moveTime || s.agreedMoveByTime,
+      targetPercent,
+      vehicleType,
+    );
+    const capacity =
+      preview?.candidate.batteryCapacityKwh || s.batteryCapacityKwh;
+    const current = s.initialSocPercent + (s.deliveredKwh / capacity) * 100;
     if (
       !Number.isFinite(targetPercent) ||
       targetPercent < current - 1e-7 ||
@@ -604,65 +812,32 @@ function useSimulationState() {
       return failure(
         `Choose a target between ${current.toFixed(1)}% and 100%.`,
       );
-    if (
-      !Number.isFinite(time(newUseByTime)) ||
-      time(newUseByTime) <= time(draft.currentTimeIso)
-    )
-      return failure('Choose a future use-by time.');
-    if (
-      maxChargeKw !== undefined &&
-      (!Number.isFinite(maxChargeKw) || maxChargeKw <= 0)
-    )
-      return failure('Enter a positive AC charging limit.');
-    s.targetPercent = targetPercent;
-    s.targetKwh =
-      (s.batteryCapacityKwh * (targetPercent - s.initialSocPercent)) / 100;
-    s.useByTime = newUseByTime;
-    s.maxChargeKw = maxChargeKw ?? s.maxChargeKw;
-    if (moveTime) {
-      if (
-        !Number.isFinite(time(moveTime)) ||
-        time(moveTime) <= time(draft.currentTimeIso) ||
-        time(moveTime) > time(newUseByTime)
-      )
-        return failure(
-          'Choose a future move time no later than your use-by time.',
-        );
-      s.agreedMoveByTime = moveTime;
-    }
-    if (remainingEnergy(s) > 1e-7) {
-      s.status = s.bayId
-        ? s.pluggedInAt
-          ? 'charging'
-          : 'waiting_plugin'
-        : 'waiting_bay';
-      s.targetReachedAt = null;
-      s.notificationsSent = {
-        fifteenMinWarning: false,
-        targetReached: false,
-        overdueWarning: false,
-      };
-    } else {
-      s.status = 'target_reached';
-      s.targetReachedAt = s.targetReachedAt || draft.currentTimeIso;
-    }
-    if (!validate(draft.sessions))
+    if (!preview?.valid)
+      return failure(preview?.error || 'Unable to check this change.');
+    if (preview.requiresAcceptance && !acceptedDeficit)
       return failure(
-        'This change would miss a charging deadline. Lower your target or explicitly extend your charging time.',
+        `This arrangement is estimated to reach ${preview.expectedPercent.toFixed(1)}%, below your target. Explicitly accept early departure or change the time or target.`,
       );
-    const prediction = predictCharging(
-      s,
-      draft.sessions,
-      draft.bays,
-      budgetRef.current,
-      algorithmRef.current,
-      draft.currentTimeIso,
-    );
-    if (!prediction.feasible)
-      return failure('This change cannot meet the confirmed schedule.');
+    Object.assign(s, preview.candidate);
+    s.earlyDepartureEstimatePercent = preview.expectedPercent;
+    s.commitmentReachedAt =
+      remainingCommitted(s) < 1e-7 ? draft.currentTimeIso : null;
+    s.targetReachedAt =
+      remainingEnergy(s) < 1e-7
+        ? s.targetReachedAt || draft.currentTimeIso
+        : null;
+    if (remainingCommitted(s) > 1e-7) s.chargingStoppedAt = null;
+    s.notificationsSent = {
+      fifteenMinWarning: false,
+      targetReached: false,
+      overdueWarning: false,
+    };
+    if (remainingCommitted(s) < 1e-7)
+      s.status =
+        remainingEnergy(s) < 1e-7 ? 'target_reached' : 'ended_incomplete';
     event(
       draft,
-      'Charging target updated; all confirmed deadlines remain protected.',
+      'Your updated arrangement is confirmed; other bookings remain protected.',
       'charging',
       'success',
       s,
@@ -696,9 +871,21 @@ function useSimulationState() {
     s.agreedMoveByTime = newTime;
     if (allowChargingDelay) {
       s.chargingDeadline = newTime;
-      s.useByTime = new Date(
-        Math.max(time(s.useByTime), time(newTime)),
-      ).toISOString();
+      // Explicit delayed charging renews the original target promise only when
+      // every confirmed booking can still be delivered.
+      s.committedKwh = s.targetKwh;
+      s.acceptedEarlyDeparture = false;
+      s.guestAcceptedDeficit = false;
+      if (remainingCommitted(s) > 1e-7) {
+        s.commitmentReachedAt = null;
+        s.chargingStoppedAt = null;
+        if (['ended_incomplete', 'target_reached'].includes(s.status))
+          s.status = s.bayId
+            ? s.pluggedInAt
+              ? 'charging'
+              : 'waiting_plugin'
+            : 'waiting_bay';
+      }
     }
     if (!validate(draft.sessions))
       return failure('This extension would break another confirmed plan.');
@@ -796,7 +983,8 @@ function useSimulationState() {
         !s?.valetTask ||
         s.valetTask.status !== 'accepted' ||
         !s.bayId ||
-        remainingEnergy(s) > 1e-7
+        (remainingCommitted(s) > 1e-7 &&
+          !['cancelled', 'ended_incomplete'].includes(s.status))
       )
         return;
       s.valetTask.status = 'completed';
@@ -813,14 +1001,24 @@ function useSimulationState() {
       (x) => x.status !== 'pending_confirmation',
     );
     if (s.status === 'pending_confirmation') cars.push(candidate);
-    predictions[s.requestId] = predictCharging(
-      candidate,
-      cars,
-      state.bays,
-      sitePowerBudgetKw,
-      activeAlgorithm,
-      state.currentTimeIso,
-    );
+    predictions[s.requestId] =
+      s.status === 'pending_confirmation'
+        ? completionRange(
+            s,
+            cars,
+            state.bays,
+            sitePowerBudgetKw,
+            activeAlgorithm,
+            state.currentTimeIso,
+          )
+        : predictCharging(
+            candidate,
+            cars,
+            state.bays,
+            sitePowerBudgetKw,
+            activeAlgorithm,
+            state.currentTimeIso,
+          );
   }
   return {
     ...state,
@@ -852,7 +1050,8 @@ function useSimulationState() {
     staffOnDuty,
     availableStandardStalls:
       12 -
-      state.sessions.filter((s) => s.valetTask?.status === 'completed').length,
+      state.sessions.filter((s) => s.valetTask?.status === 'completed').length -
+      state.historyRecords.filter((record) => record.valetUsed).length,
     idleGracePeriodMins,
     idleFeePerMin,
     extensionLimitMinutes,
@@ -860,6 +1059,9 @@ function useSimulationState() {
     predictions,
     submitRequest,
     confirmPlan,
+    getMovePreview,
+    getArrivalPreview,
+    confirmArrival,
     confirmVehicleParkedAndPlugged,
     reportVehicleMoved,
     confirmBayReleased,

@@ -1,18 +1,21 @@
-import { useMemo, useState } from "react";
-import { useSimulation } from "../../context/SimulationContext";
-import { DEFAULT_POLICIES } from "../../data/presets";
+import { guestLabel, vehicleTypeLabel } from '../../utils/guestIdentity';
+import { completeScenarioVehicles } from '../../utils/archive';
+import { useMemo, useState } from 'react';
+import { useSimulation } from '../../context/SimulationContext';
+import { DEFAULT_POLICIES } from '../../data/presets';
 import {
   DEFAULT_ASSUMPTIONS,
   runSimulationPolicy,
-} from "../../utils/allocation";
-import { addMinutesToIso, formatDateTime } from "../../utils/time";
-import { fieldClass, Field } from "../guest/GuestFields";
+} from '../../utils/allocation';
+import { addMinutesToIso, formatDateTime } from '../../utils/time';
+import { fieldClass, Field } from '../guest/GuestFields';
 export function SimulationComparisonView() {
   const {
     allPresets,
     activePresetId,
     loadPreset,
     sessions,
+    historyRecords,
     bays,
     sitePowerBudgetKw,
     chargerMaxKw,
@@ -20,25 +23,51 @@ export function SimulationComparisonView() {
   } = useSimulation();
   const preset =
     allPresets.find((p) => p.id === activePresetId) || allPresets[0];
-  const [source, setSource] = useState<"preset" | "current">("preset");
+  const [source, setSource] = useState<'preset' | 'current' | 'complete'>(
+    'preset',
+  );
   const [power, setPower] = useState(preset.sitePowerBudgetKw),
     [count, setCount] = useState(preset.bayCount),
     [charger, setCharger] = useState(chargerMaxKw);
   const [assumptions, setAssumptions] = useState(DEFAULT_ASSUMPTIONS),
-    [detail, setDetail] = useState("policy_d");
-  const cars = source === "preset" ? preset.sessions : sessions;
+    [detail, setDetail] = useState('policy_d');
+  const completeCars = useMemo(
+    () => completeScenarioVehicles(sessions, historyRecords),
+    [sessions, historyRecords],
+  );
+  const cars =
+    source === 'preset'
+      ? preset.sessions
+      : source === 'complete'
+        ? completeCars
+        : sessions;
   const start =
-    source === "preset"
+    source === 'preset'
       ? new Date(preset.simulationStartIso).toISOString()
-      : currentTimeIso;
+      : source === 'complete'
+        ? new Date(
+            Math.min(
+              Date.parse(currentTimeIso),
+              ...cars
+                .map((s) => Date.parse(s.arrivalTime))
+                .filter(Number.isFinite),
+            ),
+          ).toISOString()
+        : currentTimeIso;
   const end =
-    source === "preset"
+    source === 'preset'
       ? preset.simulationEndIso
       : addMinutesToIso(
           new Date(
             Math.max(
               Date.parse(start),
-              ...cars.map((s) => Date.parse(s.useByTime)),
+              ...cars
+                .flatMap((s) =>
+                  [s.agreedMoveByTime, s.chargingDeadline, s.arrivalTime].map(
+                    (v) => Date.parse(v || ''),
+                  ),
+                )
+                .filter(Number.isFinite),
             ),
           ).toISOString(),
           60,
@@ -100,28 +129,32 @@ export function SimulationComparisonView() {
               className={fieldClass}
               value={source}
               onChange={(e) => {
-                const value = e.target.value as "preset" | "current";
+                const value = e.target.value as
+                  'preset' | 'current' | 'complete';
                 setSource(value);
                 setPower(
-                  value === "current"
+                  value !== 'preset'
                     ? sitePowerBudgetKw
                     : preset.sitePowerBudgetKw,
                 );
-                setCount(value === "current" ? bays.length : preset.bayCount);
+                setCount(value !== 'preset' ? bays.length : preset.bayCount);
                 setCharger(
-                  value === "current" ? chargerMaxKw : preset.chargerMaxKw,
+                  value !== 'preset' ? chargerMaxKw : preset.chargerMaxKw,
                 );
               }}
             >
               <option value="preset">Preset scenario</option>
               <option value="current">Current vehicles</option>
+              <option value="complete">
+                Complete scenario (current + History)
+              </option>
             </select>
           </Field>
           <Field label="Preset scenario">
             <select
               className={fieldClass}
               value={activePresetId}
-              disabled={source === "current"}
+              disabled={source !== 'preset'}
               onChange={(e) => {
                 loadPreset(e.target.value);
                 const p = allPresets.find((p) => p.id === e.target.value)!;
@@ -137,49 +170,54 @@ export function SimulationComparisonView() {
               ))}
             </select>
           </Field>
-          {number("Site power (kW)", power, setPower)}
-          {number("Charger AC limit (kW)", charger, setCharger, 0.1)}
+          {number('Site power (kW)', power, setPower)}
+          {number('Charger AC limit (kW)', charger, setCharger, 0.1)}
           {number(
-            "Charging bays",
+            'Charging bays',
             count,
             (v) => setCount(Math.max(1, Math.floor(v))),
             1,
           )}
         </div>
         <p className="text-xs text-emerald-300">
-          Source:{" "}
-          {source === "preset"
-            ? "preset scenario"
-            : "current vehicles, current delivered energy and confirmed deadlines"}{" "}
+          Source:{' '}
+          {source === 'preset'
+            ? 'preset scenario'
+            : source === 'complete'
+              ? `complete scenario: ${historyRecords.length} archived + ${sessions.filter((s) => s.status !== 'pending_confirmation').length} current vehicles, replayed from arrival`
+              : 'current vehicles, current delivered energy and confirmed deadlines'}{' '}
           · {formatDateTime(start)} — {formatDateTime(end)}
         </p>
         <p className="text-xs text-slate-400">
-          Pending, cancelled and released plans are excluded. Current vehicle
-          edits update this comparison. Existing delivered energy is retained.
-          The benchmark assumes immediate plug-in after invitation; the live
-          demo requires reception confirmation.
+          Drafts are excluded. Complete scenario includes archived vehicles and
+          replays their final guest inputs; recorded actual outcomes remain in
+          History. Current vehicles includes only active plans. Guest stops
+          remain recorded as accepted early departures. Current vehicle edits
+          update this comparison. Existing delivered energy is retained. The
+          benchmark assumes immediate plug-in after invitation; the live demo
+          requires reception confirmation.
         </p>
       </div>
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
         <h2 className="font-semibold text-white">Simulation assumptions</h2>
         <p className="text-xs text-amber-300">
           Move delays are assumptions, not observed behaviour or guaranteed
-          benefits. Without management, a car leaves at its use-by time or after
-          90 minutes of idle occupancy. Without a response, it remains until its
-          use-by time. Staff execute one move at a time.
+          benefits. Without management, a car leaves at its agreed move time or
+          after 90 minutes of idle occupancy. Without a response, it remains
+          until its agreed move time. Staff execute one move at a time.
         </p>
         <div className="grid sm:grid-cols-4 gap-4">
           {number(
-            "Guest response delay (minutes)",
+            'Guest response delay (minutes)',
             assumptions.selfMoveMinutes,
             (v) => setAssumptions((a) => ({ ...a, selfMoveMinutes: v })),
           )}
           {number(
-            "Staff move time (minutes)",
+            'Staff move time (minutes)',
             assumptions.valetMoveMinutes,
             (v) => setAssumptions((a) => ({ ...a, valetMoveMinutes: v })),
           )}
-          {number("Available staff", assumptions.staffCount, (v) =>
+          {number('Available staff', assumptions.staffCount, (v) =>
             setAssumptions((a) => ({ ...a, staffCount: Math.floor(v) })),
           )}
           <label className="flex items-center gap-2 text-sm text-slate-300">
@@ -199,21 +237,26 @@ export function SimulationComparisonView() {
           <button
             key={r.policyId}
             onClick={() => setDetail(r.policyId)}
-            className={`text-left bg-slate-900 rounded-2xl border p-5 space-y-3 ${detail === r.policyId ? "border-emerald-500" : "border-slate-800"}`}
+            className={`text-left bg-slate-900 rounded-2xl border p-5 space-y-3 ${detail === r.policyId ? 'border-emerald-500' : 'border-slate-800'}`}
           >
             <h2 className="font-semibold text-white">
               {DEFAULT_POLICIES[i].shortName}
             </h2>
             <p className="text-xs text-slate-400">
-              {DEFAULT_POLICIES[i].allocationAlgorithm === "equal_sharing"
-                ? "Capped equal sharing"
-                : "Equal sharing with deadline protection"}
+              {DEFAULT_POLICIES[i].allocationAlgorithm === 'equal_sharing'
+                ? 'Capped equal sharing'
+                : 'Equal sharing with deadline protection'}
             </p>
             <p className="text-2xl font-mono text-emerald-300">
-              {r.onTimeSuccessRatePercent.toFixed(1)}% on time
+              {r.targetSuccessRatePercent.toFixed(1)}% target reached
             </p>
             <p className="text-sm text-slate-300">
               {r.totalDeficitKwh.toFixed(1)} kWh missing
+              <br />
+              {r.commitmentSuccessRatePercent.toFixed(1)}% promises fulfilled
+              <br />
+              {r.guestEarlyDepartureCount} accepted early departures ·{' '}
+              {r.guestEarlyDepartureDeficitKwh.toFixed(1)} kWh short
             </p>
           </button>
         ))}
@@ -223,14 +266,17 @@ export function SimulationComparisonView() {
           <thead className="text-slate-400">
             <tr>
               {[
-                "Policy",
-                "Power rule",
-                "On time",
-                "Missing kWh",
-                "Avg queue min",
-                "Idle bay min",
-                "Staff moves",
-                "Power breaches",
+                'Policy',
+                'Power rule',
+                'Original target reached',
+                'Promises fulfilled',
+                'Accepted early departures',
+                'Early departure gap kWh',
+                'Missing kWh',
+                'Avg queue min',
+                'Idle bay min',
+                'Staff moves',
+                'Power breaches',
               ].map((h) => (
                 <th className="p-3" key={h}>
                   {h}
@@ -245,12 +291,19 @@ export function SimulationComparisonView() {
                   {DEFAULT_POLICIES[i].shortName}
                 </td>
                 <td className="p-3">
-                  {DEFAULT_POLICIES[i].allocationAlgorithm === "equal_sharing"
-                    ? "Equal sharing"
-                    : "Adaptive sharing"}
+                  {DEFAULT_POLICIES[i].allocationAlgorithm === 'equal_sharing'
+                    ? 'Equal sharing'
+                    : 'Adaptive sharing'}
                 </td>
                 <td className="p-3">
-                  {r.vehiclesCompletedOnTime}/{r.totalVehicles}
+                  {r.targetSuccessRatePercent.toFixed(1)}%
+                </td>
+                <td className="p-3">
+                  {r.commitmentSuccessRatePercent.toFixed(1)}%
+                </td>
+                <td className="p-3">{r.guestEarlyDepartureCount}</td>
+                <td className="p-3">
+                  {r.guestEarlyDepartureDeficitKwh.toFixed(2)}
                 </td>
                 <td className="p-3">{r.totalDeficitKwh.toFixed(2)}</td>
                 <td className="p-3">{r.averageQueueWaitMinutes.toFixed(1)}</td>
@@ -268,18 +321,20 @@ export function SimulationComparisonView() {
         <h2 className="font-semibold text-white">{selected.policyName}</h2>
         {selected.vehicleOutcomes.map((s) => (
           <div
-            key={s.vehicleId}
+            key={s.requestId}
             className="grid sm:grid-cols-3 gap-2 border-t border-slate-800 pt-3 text-sm text-slate-300"
           >
-            <strong className="text-white">{s.vehicleId}</strong>
+            <strong className="text-white">
+              {guestLabel(s, selected.vehicleOutcomes)} · {vehicleTypeLabel(s)}
+            </strong>
             <span>
               {s.deliveredKwh.toFixed(2)} / {s.targetKwh.toFixed(2)} kWh
             </span>
             <span>
               {s.completedAt
                 ? `Target reached ${formatDateTime(s.completedAt)}`
-                : "Target not reached"}{" "}
-              · {s.onTime ? "On time" : "Incomplete by deadline"}
+                : 'Target not reached'}{' '}
+              · {s.outcomeReason}
             </span>
           </div>
         ))}

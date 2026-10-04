@@ -1,3 +1,4 @@
+import { guestLabel, vehicleTypeLabel } from '../../utils/guestIdentity';
 import React, { useState } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
 import { ShieldCheck, Key, AlertCircle, X, Check } from 'lucide-react';
@@ -8,12 +9,18 @@ interface ValetModalProps {
   requestId: string;
 }
 
-export const ValetModal: React.FC<ValetModalProps> = ({ isOpen, onClose, requestId }) => {
+export const ValetModal: React.FC<ValetModalProps> = ({
+  isOpen,
+  onClose,
+  requestId,
+}) => {
   const { requestValetAssistance, sessions } = useSimulation();
   const session = sessions.find((s) => s.requestId === requestId);
 
   const [authorized, setAuthorized] = useState(true);
-  const [keysOption, setKeysOption] = useState<'front_desk' | 'room' | 'custom'>('front_desk');
+  const [keysOption, setKeysOption] = useState<
+    'front_desk' | 'room' | 'custom'
+  >('front_desk');
   const [customKeyNote, setCustomKeyNote] = useState('');
   const [error, setError] = useState<string | null>(null);
 
@@ -48,8 +55,12 @@ export const ValetModal: React.FC<ValetModalProps> = ({ isOpen, onClose, request
               <ShieldCheck className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-white">Request Front Desk Valet Move</h3>
-              <p className="text-xs text-slate-400">Hotel Staff Vehicle Relocation</p>
+              <h3 className="text-base font-bold text-white">
+                Request Front Desk Valet Move
+              </h3>
+              <p className="text-xs text-slate-400">
+                Hotel Staff Vehicle Relocation
+              </p>
             </div>
           </div>
           <button
@@ -69,7 +80,13 @@ export const ValetModal: React.FC<ValetModalProps> = ({ isOpen, onClose, request
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <p className="text-xs text-slate-300 leading-relaxed">
-            Conveniently enjoy your dinner, meeting, or sleep. Once your vehicle (<span className="font-mono font-bold text-emerald-400">{session.vehicleId}</span>) completes its charging target, trained hotel staff will unplug and park it into a designated standard parking stall.
+            Conveniently enjoy your dinner, meeting, or sleep. Once your vehicle
+            (
+            <span className="font-mono font-bold text-emerald-400">
+              {guestLabel(session)} · {vehicleTypeLabel(session)}
+            </span>
+            ) completes its charging target, trained hotel staff will unplug and
+            park it into a designated standard parking stall.
           </p>
 
           {/* Key Drop Location */}
@@ -112,7 +129,9 @@ export const ValetModal: React.FC<ValetModalProps> = ({ isOpen, onClose, request
                   onChange={() => setKeysOption('custom')}
                   className="text-emerald-500 focus:ring-emerald-500"
                 />
-                <span className="text-slate-200 font-medium">Other Instructions</span>
+                <span className="text-slate-200 font-medium">
+                  Other Instructions
+                </span>
               </label>
 
               {keysOption === 'custom' && (
@@ -137,13 +156,20 @@ export const ValetModal: React.FC<ValetModalProps> = ({ isOpen, onClose, request
                 className="mt-0.5 rounded border-slate-700 text-emerald-500 focus:ring-emerald-500"
               />
               <span>
-                I authorize licensed motel staff to move my vehicle to an adjacent standard stall upon charge completion to keep the charging bay accessible.
+                I authorize licensed motel staff to move my vehicle to an
+                adjacent standard stall upon charge completion to keep the
+                charging bay accessible.
               </span>
             </label>
           </div>
 
           <div className="p-2.5 rounded-lg bg-slate-950 text-[11px] text-slate-400">
-            * Note: Submitting displays <strong className="text-amber-400">"Pending Front Desk Verification"</strong>. Staff verifies keys and parking spot availability before accepting.
+            * Note: Submitting displays{' '}
+            <strong className="text-amber-400">
+              "Pending Front Desk Verification"
+            </strong>
+            . Staff verifies keys and parking spot availability before
+            accepting.
           </div>
 
           <div className="flex items-center justify-end gap-2 pt-2">
