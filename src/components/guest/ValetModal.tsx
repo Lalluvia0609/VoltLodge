@@ -49,7 +49,7 @@ export const ValetModal: React.FC<ValetModalProps> = ({ isOpen, onClose, request
             </div>
             <div>
               <h3 className="text-base font-bold text-white">Request Front Desk Valet Move</h3>
-              <p className="text-xs text-slate-400">EV07 – Hotel Staff Vehicle Relocation</p>
+              <p className="text-xs text-slate-400">Hotel Staff Vehicle Relocation</p>
             </div>
           </div>
           <button

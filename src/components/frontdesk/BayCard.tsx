@@ -19,18 +19,33 @@ interface BayCardProps {
 }
 
 export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
-  const { sessions, currentTimeIso } = useSimulation();
+  const {
+    sessions,
+    currentTimeIso,
+    confirmVehicleParkedAndPlugged,
+    predictions,
+  } = useSimulation();
   const [isReleaseModalOpen, setIsReleaseModalOpen] = useState(false);
 
   const currentSession = sessions.find((s) => s.bayId === bay.bayId);
   const isTargetReached = currentSession?.status === 'target_reached';
   const isOverdue =
-    isTargetReached && currentSession && currentTimeIso > currentSession.agreedMoveByTime;
-  const overdueMins = isOverdue && currentSession ? getMinutesDiff(currentSession.agreedMoveByTime, currentTimeIso) : 0;
+    isTargetReached &&
+    currentSession &&
+    currentTimeIso > currentSession.agreedMoveByTime;
+  const overdueMins =
+    isOverdue && currentSession
+      ? getMinutesDiff(currentSession.agreedMoveByTime, currentTimeIso)
+      : 0;
 
   // Progress
   const progressPercent = currentSession
-    ? Math.min(100, Math.round((currentSession.deliveredKwh / currentSession.targetKwh) * 100))
+    ? Math.min(
+        100,
+        Math.round(
+          (currentSession.deliveredKwh / currentSession.targetKwh) * 100,
+        ),
+      )
     : 0;
 
   return (
@@ -39,10 +54,10 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
         bay.currentStatus === 'vacant'
           ? 'bg-slate-900/60 border-slate-800'
           : isOverdue
-          ? 'bg-rose-950/20 border-rose-500/40 ring-1 ring-rose-500/30'
-          : isTargetReached
-          ? 'bg-amber-950/20 border-amber-500/40'
-          : 'bg-slate-900 border-slate-800'
+            ? 'bg-rose-950/20 border-rose-500/40 ring-1 ring-rose-500/30'
+            : isTargetReached
+              ? 'bg-amber-950/20 border-amber-500/40'
+              : 'bg-slate-900 border-slate-800'
       }`}
     >
       <div>
@@ -71,7 +86,17 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
             ) : (
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-ping" />
-                Charging Active
+                {currentSession?.status === 'waiting_plugin'
+                  ? 'Reserved · waiting for plug-in'
+                  : currentSession?.moveReportedAt
+                    ? 'Move reported · verify bay'
+                    : currentSession?.status === 'paused'
+                      ? 'Paused'
+                      : currentSession?.status === 'cancelled'
+                        ? 'Stopped · still occupied'
+                        : currentSession?.status === 'ended_incomplete'
+                          ? 'Deadline reached · still occupied'
+                          : 'Charging Active'}
               </span>
             )}
           </div>
@@ -105,7 +130,9 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
                   Live Power
                 </span>
                 <span className="font-mono text-xl font-extrabold text-emerald-400">
-                  {currentSession.allocatedKw > 0 ? `${currentSession.allocatedKw.toFixed(1)} kW` : '0.0 kW'}
+                  {currentSession.allocatedKw > 0
+                    ? `${currentSession.allocatedKw.toFixed(1)} kW`
+                    : '0.0 kW'}
                 </span>
               </div>
             </div>
@@ -114,7 +141,8 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
             <div className="space-y-1">
               <div className="flex justify-between text-xs font-mono">
                 <span className="text-slate-300">
-                  {currentSession.deliveredKwh.toFixed(1)} / {currentSession.targetKwh.toFixed(1)} kWh
+                  {currentSession.deliveredKwh.toFixed(1)} /{' '}
+                  {currentSession.targetKwh.toFixed(1)} kWh
                 </span>
                 <span className="text-slate-400">{progressPercent}%</span>
               </div>
@@ -131,14 +159,21 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
             {/* Timings */}
             <div className="grid grid-cols-2 gap-2 text-xs pt-1">
               <div className="p-2 bg-slate-950 rounded-lg border border-slate-800/80">
-                <span className="text-[10px] text-slate-400 block">Target Finish</span>
+                <span className="text-[10px] text-slate-400 block">
+                  Target Finish
+                </span>
                 <span className="font-mono text-emerald-300 font-semibold">
-                  {formatTimeOnly(currentSession.estimatedFinishTime)}
+                  {formatTimeOnly(
+                    currentSession.targetReachedAt ||
+                      predictions[currentSession.requestId]?.expected,
+                  )}
                 </span>
               </div>
 
               <div className="p-2 bg-slate-950 rounded-lg border border-slate-800/80">
-                <span className="text-[10px] text-slate-400 block">Agreed Move-By</span>
+                <span className="text-[10px] text-slate-400 block">
+                  Agreed Move-By
+                </span>
                 <span
                   className={`font-mono font-semibold ${
                     isOverdue ? 'text-rose-400 font-bold' : 'text-amber-300'
@@ -169,7 +204,21 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
 
       {/* Card Actions Footer */}
       {bay.currentStatus !== 'vacant' && (
-        <div className="pt-3 border-t border-slate-800/80 flex items-center justify-end">
+        <div className="pt-3 border-t border-slate-800/80 flex flex-wrap gap-2 items-center justify-end">
+          {currentSession?.status === 'waiting_plugin' && (
+            <button
+              className="px-3 py-1.5 rounded-xl bg-emerald-600 text-white text-xs"
+              onClick={() => {
+                const result = confirmVehicleParkedAndPlugged(
+                  bay.bayId,
+                  currentSession.vehicleId,
+                );
+                if (!result.success) window.alert(result.error);
+              }}
+            >
+              Confirm parked &amp; plugged in
+            </button>
+          )}
           <button
             onClick={() => setIsReleaseModalOpen(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition border border-slate-700 hover:text-white"

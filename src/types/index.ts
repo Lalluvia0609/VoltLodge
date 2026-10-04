@@ -1,30 +1,27 @@
 export type ChargingStatus =
   | 'pending_confirmation' // EV01 -> EV02 review
-  | 'waiting_bay'          // in queue waiting for an open charger bay
-  | 'waiting_plugin'       // assigned bay, waiting for vehicle entry and cable plug
-  | 'charging'             // actively drawing power
-  | 'paused'               // 0 kW due to grid limit or power allocation
-  | 'target_reached'       // completed target kWh, but still occupying bay (hogging)
-  | 'ended_incomplete'     // departed before reaching target (e.g. guest left early or deadline reached)
-  | 'cancelled';           // cancelled by guest
+  | 'waiting_bay' // in queue waiting for an open charger bay
+  | 'waiting_plugin' // assigned bay, waiting for vehicle entry and cable plug
+  | 'charging' // actively drawing power
+  | 'paused' // 0 kW due to grid limit or power allocation
+  | 'target_reached' // completed target kWh, but still occupying bay (hogging)
+  | 'ended_incomplete' // departed before reaching target (e.g. guest left early or deadline reached)
+  | 'cancelled'; // cancelled by guest
 
 export type BayStatus =
-  | 'vacant'               // empty and available
-  | 'reserved_entry'       // waiting for designated vehicle to pull in
-  | 'occupied_charging'    // vehicle plugged in and charging/paused
-  | 'occupied_idle';       // vehicle finished charging, occupying bay
+  | 'vacant' // empty and available
+  | 'reserved_entry' // waiting for designated vehicle to pull in
+  | 'occupied_charging' // vehicle plugged in and charging/paused
+  | 'occupied_idle'; // vehicle finished charging, occupying bay
 
 export type ValetTaskStatus =
   | 'none'
-  | 'pending_review'       // guest submitted, awaiting front desk check
-  | 'accepted'             // front desk confirmed 4 items & assigned staff
-  | 'rejected'             // front desk declined with reason
-  | 'completed';           // staff physically moved car to regular stall and freed bay
+  | 'pending_review' // guest submitted, awaiting front desk check
+  | 'accepted' // front desk confirmed 4 items & assigned staff
+  | 'rejected' // front desk declined with reason
+  | 'completed'; // staff physically moved car to regular stall and freed bay
 
-export type ExtensionStatus =
-  | 'pending'
-  | 'approved'
-  | 'rejected';
+export type ExtensionStatus = 'pending' | 'approved' | 'rejected';
 
 export interface VehicleRequestInput {
   vehicleId: string;
@@ -35,8 +32,9 @@ export interface VehicleRequestInput {
   batteryCapacityKwh?: number;
   currentPercent?: number;
   targetPercent?: number;
-  useByTime: string;          // ISO string
-  requestedMoveTime: string;  // ISO string
+  maxChargeKw?: number; // Vehicle AC acceptance limit, independent of the charger.
+  useByTime: string; // ISO string
+  requestedMoveTime: string; // ISO string
   moveMethod: 'self' | 'valet';
 }
 
@@ -49,9 +47,9 @@ export interface ChargingSession {
   initialSocPercent: number;
   targetKwh: number;
   targetPercent: number;
-  arrivalTime: string;         // ISO string
-  useByTime: string;           // ISO string
-  agreedMoveByTime: string;     // ISO string
+  arrivalTime: string; // ISO string
+  useByTime: string; // ISO string
+  agreedMoveByTime: string; // ISO string
   moveMethod: 'self' | 'valet';
 
   // Planned estimates
@@ -61,13 +59,19 @@ export interface ChargingSession {
   isFeasibleOnTime: boolean;
   projectedDeficitKwh: number;
   guestAcceptedDeficit: boolean;
+  originalLatestFinishTime?: string;
+  chargingDeadline?: string;
+  completionWindowStart?: string;
+  completionWindowEnd?: string;
+  moveReportedAt?: string | null;
+  simulatedValetMoved?: boolean;
 
   // Real-time dynamic state
   status: ChargingStatus;
-  bayId: string | null;        // e.g. "bay-1"
+  bayId: string | null; // e.g. "bay-1"
   deliveredKwh: number;
   allocatedKw: number;
-  maxChargeKw: number;         // car/charger maximum kW capability (e.g. 7.0 kW or 11.0 kW)
+  maxChargeKw: number; // car/charger maximum kW capability (e.g. 7.0 kW or 11.0 kW)
   pluggedInAt: string | null;
   targetReachedAt: string | null;
   bayReleasedAt: string | null;
@@ -122,6 +126,7 @@ export interface ExtensionRequest {
   status: ExtensionStatus;
   requestedAt: string;
   reviewedAt?: string;
+  allowChargingDelay?: boolean;
 }
 
 export interface SystemEvent {

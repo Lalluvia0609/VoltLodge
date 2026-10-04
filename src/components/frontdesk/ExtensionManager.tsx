@@ -72,7 +72,7 @@ export const ExtensionManager: React.FC = () => {
                   className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white font-semibold transition"
                 >
                   <Check className="w-3.5 h-3.5" />
-                  <span>Approve (+30m)</span>
+                  <span>Approve</span>
                 </button>
               </div>
             )}

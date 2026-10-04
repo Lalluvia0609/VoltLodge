@@ -38,9 +38,9 @@ const MainContent: React.FC = () => {
           <div className="flex items-center gap-4 text-[11px]">
             <span>Electrification Track</span>
             <span>•</span>
-            <span>NZ Local Timezone Handling</span>
+            <span>Times shown in Auckland</span>
             <span>•</span>
-            <span className="text-emerald-400 font-mono">EV01–EV14 Implemented</span>
+            <span className="text-emerald-400 font-mono">AC charging simulation</span>
           </div>
         </div>
       </footer>
