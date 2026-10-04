@@ -128,7 +128,7 @@ export const BayReleaseModal: React.FC<BayReleaseModalProps> = ({ isOpen, onClos
           </div>
 
           <div className="p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-[11px] text-blue-300">
-            ⚡ Releasing this bay will automatically notify and admit the next waiting vehicle from the queue.
+            ⚡ Releasing this bay will notify the next waiting vehicle and reserve this bay. Staff must confirm arrival and plug-in before charging starts.
           </div>
 
           <div className="flex items-center justify-end gap-2 pt-2">

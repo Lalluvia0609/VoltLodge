@@ -40,15 +40,29 @@ export const Header: React.FC = () => {
     systemEvents,
   } = useSimulation();
 
-  const powerPercentage = Math.min(100, Math.round((totalAllocatedPowerKw / sitePowerBudgetKw) * 100));
+  const powerPercentage = Math.min(
+    100,
+    Math.round(
+      (sitePowerBudgetKw > 0 ? totalAllocatedPowerKw / sitePowerBudgetKw : 0) *
+        100,
+    ),
+  );
 
   // Count pending front desk tasks
-  const pendingValetCount = sessions.filter((s) => s.valetTask?.status === 'pending_review').length;
-  const overdueBayCount = sessions.filter(
-    (s) => s.status === 'target_reached' && s.bayId && currentTimeIso > s.agreedMoveByTime
+  const pendingValetCount = sessions.filter(
+    (s) => s.valetTask?.status === 'pending_review',
   ).length;
-  const pendingExtCount = sessions.filter((s) => s.extensionRequest?.status === 'pending').length;
-  const totalFrontDeskAlerts = pendingValetCount + overdueBayCount + pendingExtCount;
+  const overdueBayCount = sessions.filter(
+    (s) =>
+      s.status === 'target_reached' &&
+      s.bayId &&
+      currentTimeIso > s.agreedMoveByTime,
+  ).length;
+  const pendingExtCount = sessions.filter(
+    (s) => s.extensionRequest?.status === 'pending',
+  ).length;
+  const totalFrontDeskAlerts =
+    pendingValetCount + overdueBayCount + pendingExtCount;
 
   return (
     <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40">
@@ -62,7 +76,9 @@ export const Header: React.FC = () => {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-xl font-bold tracking-tight text-white">VoltLodge</span>
+                <span className="text-xl font-bold tracking-tight text-white">
+                  VoltLodge
+                </span>
                 <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                   Electrification Prototype
                 </span>
@@ -116,8 +132,8 @@ export const Header: React.FC = () => {
               }`}
             >
               <BarChart3 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">EV10 Benchmark</span>
-              <span className="sm:hidden">EV10</span>
+              <span className="hidden sm:inline">Comparison</span>
+              <span className="sm:hidden">Compare</span>
             </button>
           </div>
 
@@ -127,7 +143,8 @@ export const Header: React.FC = () => {
               <div className="text-[11px] text-slate-400 flex items-center justify-end gap-1">
                 <span>Site Power Load</span>
                 <span className="font-mono text-white font-bold">
-                  {totalAllocatedPowerKw.toFixed(1)} / {sitePowerBudgetKw.toFixed(1)} kW
+                  {totalAllocatedPowerKw.toFixed(1)} /{' '}
+                  {sitePowerBudgetKw.toFixed(1)} kW
                 </span>
               </div>
               <div className="w-28 bg-slate-800 h-1.5 rounded-full overflow-hidden mt-1">
@@ -136,8 +153,8 @@ export const Header: React.FC = () => {
                     powerPercentage >= 95
                       ? 'bg-rose-500'
                       : powerPercentage >= 75
-                      ? 'bg-amber-400'
-                      : 'bg-emerald-400'
+                        ? 'bg-amber-400'
+                        : 'bg-emerald-400'
                   }`}
                   style={{ width: `${powerPercentage}%` }}
                 />
@@ -145,7 +162,9 @@ export const Header: React.FC = () => {
             </div>
             <div
               className={`p-1.5 rounded-lg ${
-                powerPercentage >= 95 ? 'bg-rose-500/10 text-rose-400' : 'bg-emerald-500/10 text-emerald-400'
+                powerPercentage >= 95
+                  ? 'bg-rose-500/10 text-rose-400'
+                  : 'bg-emerald-500/10 text-emerald-400'
               }`}
             >
               <BatteryCharging className="w-4 h-4" />
@@ -159,7 +178,9 @@ export const Header: React.FC = () => {
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs">
           {/* Preset Selector */}
           <div className="flex items-center gap-2">
-            <span className="text-slate-400 font-medium hidden sm:inline">Scenario:</span>
+            <span className="text-slate-400 font-medium hidden sm:inline">
+              Scenario:
+            </span>
             <select
               value={activePresetId}
               onChange={(e) => loadPreset(e.target.value)}
@@ -177,8 +198,12 @@ export const Header: React.FC = () => {
           <div className="flex items-center gap-3">
             {/* Clock display */}
             <div className="flex items-center gap-2 bg-slate-900 border border-slate-800 px-3 py-1 rounded-lg">
-              <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-400 animate-ping' : 'bg-amber-400'}`} />
-              <span className="text-slate-400 text-[11px]">Clock (NZST):</span>
+              <span
+                className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-400 animate-ping' : 'bg-amber-400'}`}
+              />
+              <span className="text-slate-400 text-[11px]">
+                Simulation · Auckland:
+              </span>
               <span className="font-mono text-emerald-300 font-semibold tracking-wide">
                 {formatDateTime(currentTimeIso)}
               </span>
@@ -195,7 +220,11 @@ export const Header: React.FC = () => {
                     : 'bg-emerald-500 text-white hover:bg-emerald-600'
                 }`}
               >
-                {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                {isPlaying ? (
+                  <Pause className="w-3.5 h-3.5" />
+                ) : (
+                  <Play className="w-3.5 h-3.5" />
+                )}
               </button>
 
               <button
@@ -248,7 +277,9 @@ export const Header: React.FC = () => {
           {/* Quick Vehicle Switcher (when in Guest view) */}
           {userRole === 'guest' && (
             <div className="flex items-center gap-2">
-              <span className="text-slate-400 font-medium">Viewing Vehicle:</span>
+              <span className="text-slate-400 font-medium">
+                Viewing Vehicle:
+              </span>
               <select
                 value={activeRequestId || ''}
                 onChange={(e) => setActiveRequestId(e.target.value || null)}
@@ -256,10 +287,11 @@ export const Header: React.FC = () => {
               >
                 {sessions.map((s) => (
                   <option key={s.requestId} value={s.requestId}>
-                    {s.vehicleId} ({s.guestName}) - {s.status.replace('_', ' ').toUpperCase()}
+                    {s.vehicleId} ({s.guestName}) -{' '}
+                    {s.status.replace('_', ' ').toUpperCase()}
                   </option>
                 ))}
-                <option value="">+ Register New Vehicle (EV01)</option>
+                <option value="">Choose a vehicle</option>
               </select>
             </div>
           )}
@@ -270,15 +302,26 @@ export const Header: React.FC = () => {
               <span className="text-slate-400 font-medium">Active Policy:</span>
               <button
                 onClick={() =>
-                  setActiveAlgorithm(activeAlgorithm === 'demand_urgency' ? 'equal_sharing' : 'demand_urgency')
+                  (() => {
+                    const result = setActiveAlgorithm(
+                      activeAlgorithm === 'demand_urgency'
+                        ? 'equal_sharing'
+                        : 'demand_urgency',
+                    );
+                    if (!result.success) window.alert(result.error);
+                  })()
                 }
                 className="flex items-center gap-1.5 bg-slate-900 border border-slate-700 px-2.5 py-1 rounded-lg hover:border-emerald-500 transition text-xs"
               >
                 <Sliders className="w-3 h-3 text-emerald-400" />
                 <span className="font-semibold text-slate-200">
-                  {activeAlgorithm === 'demand_urgency' ? 'Urgency-First Sharing' : 'Equal Power Sharing'}
+                  {activeAlgorithm === 'demand_urgency'
+                    ? 'Adaptive sharing'
+                    : 'Equal Power Sharing'}
                 </span>
-                <span className="text-[10px] text-slate-400 font-mono">(Click to switch)</span>
+                <span className="text-[10px] text-slate-400 font-mono">
+                  (Click to switch)
+                </span>
               </button>
             </div>
           )}

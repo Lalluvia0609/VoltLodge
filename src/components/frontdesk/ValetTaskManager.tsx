@@ -23,18 +23,24 @@ export const ValetTaskManager: React.FC = () => {
   } = useSimulation();
 
   // Find all active valet tasks
-  const valetSessions = sessions.filter((s) => s.valetTask && s.valetTask.status !== 'none');
+  const valetSessions = sessions.filter(
+    (s) => s.valetTask && s.valetTask.status !== 'none',
+  );
 
   // Modal / form states for accepting/rejecting
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [actionType, setActionType] = useState<'accept' | 'reject' | null>(null);
+  const [actionType, setActionType] = useState<'accept' | 'reject' | null>(
+    null,
+  );
 
   // 4-item checklist for acceptance
-  const [authChecked, setAuthChecked] = useState(true);
-  const [keysChecked, setKeysChecked] = useState(true);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [keysChecked, setKeysChecked] = useState(false);
   const [assignedStaff, setAssignedStaff] = useState(staffOnDuty[0]);
   const [targetStall, setTargetStall] = useState('Standard Stall #14');
-  const [rejectReason, setRejectReason] = useState('Staff shortage on current shift.');
+  const [rejectReason, setRejectReason] = useState(
+    'Staff shortage on current shift.',
+  );
 
   const handleOpenAction = (taskId: string, type: 'accept' | 'reject') => {
     setSelectedTaskId(taskId);
@@ -66,7 +72,9 @@ export const ValetTaskManager: React.FC = () => {
       <div className="flex items-center justify-between pb-3 border-b border-slate-800">
         <div className="flex items-center gap-2">
           <ShieldCheck className="w-5 h-5 text-emerald-400" />
-          <h3 className="text-base font-bold text-white">Staff Valet Relocation Dispatch</h3>
+          <h3 className="text-base font-bold text-white">
+            Staff Valet Relocation Dispatch
+          </h3>
           <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
             {valetSessions.length} total
           </span>
@@ -74,7 +82,9 @@ export const ValetTaskManager: React.FC = () => {
 
         <div className="text-xs text-slate-400 flex items-center gap-2">
           <span>Stalls Available:</span>
-          <span className="font-mono text-emerald-400 font-bold">{availableStandardStalls}</span>
+          <span className="font-mono text-emerald-400 font-bold">
+            {availableStandardStalls}
+          </span>
         </div>
       </div>
 
@@ -99,7 +109,8 @@ export const ValetTaskManager: React.FC = () => {
                       {task.vehicleId}
                     </span>
                     <span className="text-slate-400">
-                      (Room {s.roomNumber}) · {s.bayId ? `Bay ${s.bayId.slice(-1)}` : 'Queued'}
+                      (Room {s.roomNumber}) ·{' '}
+                      {s.bayId ? `Bay ${s.bayId.split('-').at(-1)}` : 'Queued'}
                     </span>
                   </div>
 
@@ -109,13 +120,14 @@ export const ValetTaskManager: React.FC = () => {
                         task.status === 'completed'
                           ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                           : task.status === 'accepted'
-                          ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
-                          : task.status === 'rejected'
-                          ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                          : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                            ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+                            : task.status === 'rejected'
+                              ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                              : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
                       }`}
                     >
-                      {task.status === 'pending_review' && 'Pending Front Desk Review'}
+                      {task.status === 'pending_review' &&
+                        'Pending Front Desk Review'}
                       {task.status === 'accepted' && 'Staff Assigned'}
                       {task.status === 'completed' && 'Relocation Completed'}
                       {task.status === 'rejected' && 'Declined'}
@@ -125,21 +137,27 @@ export const ValetTaskManager: React.FC = () => {
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-slate-300">
                   <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-500 block">Keys Location</span>
+                    <span className="text-[10px] text-slate-500 block">
+                      Keys Location
+                    </span>
                     <span className="text-white font-medium truncate block">
                       {task.keysHandoverNote}
                     </span>
                   </div>
 
                   <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-500 block">Assigned Staff</span>
+                    <span className="text-[10px] text-slate-500 block">
+                      Assigned Staff
+                    </span>
                     <span className="text-white font-medium truncate block">
                       {task.staffAssigned || 'Awaiting Assignment'}
                     </span>
                   </div>
 
                   <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
-                    <span className="text-[10px] text-slate-500 block">Target Stall</span>
+                    <span className="text-[10px] text-slate-500 block">
+                      Target Stall
+                    </span>
                     <span className="text-white font-medium truncate block">
                       {task.destinationBay || 'Pending'}
                     </span>
@@ -153,20 +171,28 @@ export const ValetTaskManager: React.FC = () => {
                     <strong className="text-white font-mono">
                       {s.deliveredKwh.toFixed(1)} / {s.targetKwh.toFixed(1)} kWh
                     </strong>{' '}
-                    ({isTargetReached ? 'Target Reached, Ready for Move' : 'Still Charging'})
+                    (
+                    {isTargetReached
+                      ? 'Target Reached, Ready for Move'
+                      : 'Still Charging'}
+                    )
                   </span>
 
                   <div className="flex items-center gap-2">
                     {task.status === 'pending_review' && (
                       <>
                         <button
-                          onClick={() => handleOpenAction(task.taskId, 'reject')}
+                          onClick={() =>
+                            handleOpenAction(task.taskId, 'reject')
+                          }
                           className="px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 font-medium transition"
                         >
                           Decline
                         </button>
                         <button
-                          onClick={() => handleOpenAction(task.taskId, 'accept')}
+                          onClick={() =>
+                            handleOpenAction(task.taskId, 'accept')
+                          }
                           className="px-3 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white font-semibold shadow-sm transition"
                         >
                           Review & Accept Task
@@ -177,7 +203,13 @@ export const ValetTaskManager: React.FC = () => {
                     {task.status === 'accepted' && (
                       <button
                         onClick={() => completeValetTask(task.taskId)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white font-semibold shadow-md shadow-emerald-500/20 transition"
+                        disabled={!isTargetReached}
+                        title={
+                          isTargetReached
+                            ? 'Confirm staff moved the car'
+                            : 'Wait until the target is reached'
+                        }
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white font-semibold shadow-md shadow-emerald-500/20 transition disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         <Check className="w-3.5 h-3.5" />
                         <span>Execute Move & Free Charger (EV09)</span>
@@ -204,7 +236,8 @@ export const ValetTaskManager: React.FC = () => {
             {actionType === 'accept' ? (
               <div className="space-y-3 text-xs">
                 <p className="text-slate-400">
-                  Front desk policy decision table: verify all 4 criteria before dispatching staff.
+                  Front desk policy decision table: verify all 4 criteria before
+                  dispatching staff.
                 </p>
 
                 {/* 1. Authorization */}
@@ -286,14 +319,23 @@ export const ValetTaskManager: React.FC = () => {
               </button>
               <button
                 onClick={handleConfirmAction}
-                disabled={actionType === 'accept' && (!authChecked || !keysChecked)}
+                disabled={
+                  actionType === 'accept' &&
+                  (!authChecked ||
+                    !keysChecked ||
+                    !assignedStaff ||
+                    !targetStall.trim() ||
+                    availableStandardStalls <= 0)
+                }
                 className={`px-4 py-1.5 rounded-xl text-xs font-semibold shadow-md transition ${
                   actionType === 'accept'
                     ? 'bg-emerald-500 hover:bg-emerald-600 text-white'
                     : 'bg-rose-500 hover:bg-rose-600 text-white'
                 }`}
               >
-                {actionType === 'accept' ? 'Confirm Acceptance' : 'Decline Request'}
+                {actionType === 'accept'
+                  ? 'Confirm Acceptance'
+                  : 'Decline Request'}
               </button>
             </div>
           </div>

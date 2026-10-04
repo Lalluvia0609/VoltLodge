@@ -1,3 +1,4 @@
+import { formatTimeOnly } from '../../utils/time';
 import React, { useState } from 'react';
 import { useSimulation } from '../../context/SimulationContext';
 import { BayCard } from './BayCard';
@@ -30,18 +31,38 @@ export const FrontDeskView: React.FC = () => {
     systemEvents,
     clearAllEvents,
     currentTimeIso,
+    chargerMaxKw,
+    setChargerMaxKw,
+    extensionLimitMinutes,
+    setExtensionLimitMinutes,
   } = useSimulation();
 
-  const [activeTab, setActiveTab] = useState<'bays' | 'valet' | 'queue' | 'history'>('bays');
+  const [activeTab, setActiveTab] = useState<
+    'bays' | 'valet' | 'queue' | 'history'
+  >('bays');
 
   // Counts
-  const activeChargingCount = bays.filter((b) => b.currentStatus === 'occupied_charging').length;
-  const hoggingBayCount = bays.filter((b) => b.currentStatus === 'occupied_idle').length;
+  const activeChargingCount = bays.filter(
+    (b) => b.currentStatus === 'occupied_charging',
+  ).length;
+  const hoggingBayCount = bays.filter(
+    (b) => b.currentStatus === 'occupied_idle',
+  ).length;
   const queuedCount = sessions.filter((s) => s.status === 'waiting_bay').length;
-  const pendingValetCount = sessions.filter((s) => s.valetTask?.status === 'pending_review').length;
-  const pendingExtCount = sessions.filter((s) => s.extensionRequest?.status === 'pending').length;
+  const pendingValetCount = sessions.filter(
+    (s) => s.valetTask?.status === 'pending_review',
+  ).length;
+  const pendingExtCount = sessions.filter(
+    (s) => s.extensionRequest?.status === 'pending',
+  ).length;
 
-  const powerPercent = Math.min(100, Math.round((totalAllocatedPowerKw / sitePowerBudgetKw) * 100));
+  const powerPercent = Math.min(
+    100,
+    Math.round(
+      (sitePowerBudgetKw > 0 ? totalAllocatedPowerKw / sitePowerBudgetKw : 0) *
+        100,
+    ),
+  );
 
   return (
     <div className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8 space-y-6">
@@ -62,21 +83,27 @@ export const FrontDeskView: React.FC = () => {
                 {totalAllocatedPowerKw.toFixed(1)}
               </span>
               <span className="text-slate-400 font-mono text-sm">
-                / {sitePowerBudgetKw.toFixed(1)} kW Site Budget ({powerPercent}%)
+                / {sitePowerBudgetKw.toFixed(1)} kW Site Budget ({powerPercent}
+                %)
               </span>
             </div>
           </div>
 
           {/* Quick budget test slider */}
           <div className="flex items-center gap-3 bg-slate-950 p-2.5 rounded-xl border border-slate-800 text-xs">
-            <span className="text-slate-400 font-medium">Test Power Budget:</span>
+            <span className="text-slate-400 font-medium">
+              Test Power Budget:
+            </span>
             <input
               type="range"
-              min="7"
+              min="0"
               max="40"
               step="1"
               value={sitePowerBudgetKw}
-              onChange={(e) => setSitePowerBudgetKw(Number(e.target.value))}
+              onChange={(e) => {
+                const result = setSitePowerBudgetKw(Number(e.target.value));
+                if (!result.success) window.alert(result.error);
+              }}
               className="w-28 accent-emerald-500 cursor-pointer"
             />
             <span className="font-mono font-bold text-white w-12 text-right">
@@ -94,10 +121,13 @@ export const FrontDeskView: React.FC = () => {
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              Urgency/Demand Sharing
+              Adaptive sharing
             </button>
             <button
-              onClick={() => setActiveAlgorithm('equal_sharing')}
+              onClick={() => {
+                const result = setActiveAlgorithm('equal_sharing');
+                if (!result.success) window.alert(result.error);
+              }}
               className={`px-3 py-1.5 rounded-lg font-medium transition ${
                 activeAlgorithm === 'equal_sharing'
                   ? 'bg-emerald-500 text-white shadow-sm font-semibold'
@@ -109,6 +139,42 @@ export const FrontDeskView: React.FC = () => {
           </div>
         </div>
 
+        <div className="flex flex-wrap gap-4 py-3 text-xs text-slate-300">
+          <label>
+            Charger AC limit (kW){' '}
+            <input
+              aria-label="Charger AC limit"
+              type="number"
+              min="0.1"
+              step="0.1"
+              value={chargerMaxKw}
+              className="bg-slate-950 border border-slate-700 rounded-lg p-2 w-20"
+              onChange={(e) => {
+                const result = setChargerMaxKw(Number(e.target.value));
+                if (!result.success) window.alert(result.error);
+              }}
+            />
+          </label>
+          <label>
+            Extension limit from original plan (minutes){' '}
+            <input
+              aria-label="Extension limit"
+              type="number"
+              min="0"
+              value={extensionLimitMinutes}
+              className="bg-slate-950 border border-slate-700 rounded-lg p-2 w-20"
+              onChange={(e) => {
+                const minutes = Number(e.target.value);
+                if (Number.isFinite(minutes) && minutes >= 0)
+                  setExtensionLimitMinutes(minutes);
+              }}
+            />
+          </label>
+          <span>
+            Power reductions that break a confirmed deadline are rejected. Use
+            the comparison page for insufficient-power tests.
+          </span>
+        </div>
         {/* Load bar */}
         <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden mt-4 border border-slate-800">
           <div
@@ -116,8 +182,8 @@ export const FrontDeskView: React.FC = () => {
               powerPercent >= 95
                 ? 'bg-rose-500'
                 : powerPercent >= 75
-                ? 'bg-amber-400'
-                : 'bg-emerald-500'
+                  ? 'bg-amber-400'
+                  : 'bg-emerald-500'
             }`}
             style={{ width: `${powerPercent}%` }}
           />
@@ -132,7 +198,10 @@ export const FrontDeskView: React.FC = () => {
             <BatteryCharging className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="text-2xl font-mono font-bold text-white mt-1">
-            {activeChargingCount} <span className="text-xs font-normal text-slate-400">/ {bays.length}</span>
+            {activeChargingCount}{' '}
+            <span className="text-xs font-normal text-slate-400">
+              / {bays.length}
+            </span>
           </div>
         </div>
 
@@ -273,14 +342,14 @@ export const FrontDeskView: React.FC = () => {
                     evt.type === 'alert'
                       ? 'bg-rose-400'
                       : evt.type === 'warning'
-                      ? 'bg-amber-400'
-                      : evt.type === 'success'
-                      ? 'bg-emerald-400'
-                      : 'bg-blue-400'
+                        ? 'bg-amber-400'
+                        : evt.type === 'success'
+                          ? 'bg-emerald-400'
+                          : 'bg-blue-400'
                   }`}
                 />
                 <span className="font-mono text-[10px] text-slate-500 shrink-0">
-                  {evt.timestamp.slice(11, 16)}
+                  {formatTimeOnly(evt.timestamp)}
                 </span>
                 <span className="text-slate-300">{evt.message}</span>
               </div>
