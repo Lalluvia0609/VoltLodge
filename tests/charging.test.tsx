@@ -1,3 +1,7 @@
+import { PenaltySummary } from '../src/components/frontdesk/PenaltySummary';
+import { BayCard } from '../src/components/frontdesk/BayCard';
+import { QueueManager } from '../src/components/frontdesk/QueueManager';
+import { bookingPenalty, DEFAULT_PENALTY_POLICY } from '../src/utils/penalties';
 import {
   guestLabel,
   guestDetails,
@@ -301,7 +305,13 @@ async function mount(comparison = false, guest = false, staff = false) {
   let api!: ReturnType<typeof useSimulation>, renderer!: ReactTestRenderer;
   function Probe() {
     api = useSimulation();
-    return null;
+    return staff ? (
+      <>
+        {api.bays.map((bay) => (
+          <BayCard key={bay.bayId} bay={bay} />
+        ))}
+      </>
+    ) : null;
   }
   await act(async () => {
     renderer = create(
@@ -309,7 +319,13 @@ async function mount(comparison = false, guest = false, staff = false) {
         <Probe />
         {comparison && <SimulationComparisonView />}
         {guest && <GuestView />}
-        {staff && <ValetTaskManager />}
+        {staff && (
+          <>
+            <ValetTaskManager />
+            <PenaltySummary />
+            <QueueManager />
+          </>
+        )}
       </SimulationProvider>,
     );
   });
@@ -1900,4 +1916,277 @@ test('unnamed guest uses a stable short booking label before and after archive; 
   } finally {
     await h.close();
   }
+});
+
+test('deadline slack gives nearly finished urgent cars only needed power and shares the rest; exact completion redistributes immediately', () => {
+  const cars = [
+    car('A', 0.1, 1),
+    car('B', 0.1, 300),
+    car('C', 7, 120),
+    car('D', 7, 120),
+  ];
+  const bays = hardware(['A', 'B', 'C', 'D']);
+  assert.ok(validateSchedule(cars, bays, 14, start).feasible);
+  const power = calculatePowerAllocation(
+    cars,
+    bays,
+    14,
+    'demand_urgency',
+    start,
+  );
+  near(power.get('A')!, 6);
+  assert.ok(power.get('B')! > 0 && power.get('B')! < 1);
+  assert.ok(power.get('C')! > 3 && power.get('D')! > 3);
+  near(
+    [...power.values()].reduce((a, b) => a + b, 0),
+    14,
+  );
+  cars.forEach((s) =>
+    assert.ok(power.get(s.requestId)! <= Math.min(7, s.maxChargeKw)),
+  );
+  const after = advanceEngine(state(cars, bays), 1, 14, 'demand_urgency');
+  assert.equal(after.sessions[0].targetReachedAt, at(1));
+  assert.equal(after.sessions[0].allocatedKw, 0);
+  assert.ok(after.sessions[0].bayId);
+  assert.ok(after.sessions[2].allocatedKw > power.get('C')!);
+  const done = advanceEngine(after, 299, 14, 'demand_urgency');
+  done.sessions.forEach((s) => {
+    near(s.deliveredKwh, s.targetKwh);
+    assert.ok(
+      Date.parse(s.targetReachedAt!) <= Date.parse(s.chargingDeadline!),
+    );
+  });
+});
+
+test('genuinely mandatory full-power deadlines may temporarily pause flexible cars', () => {
+  const cars = [
+    car('A', 7, 60),
+    car('B', 7, 60),
+    car('C', 7, 300),
+    car('D', 7, 300),
+  ];
+  const bays = hardware(['A', 'B', 'C', 'D']);
+  assert.ok(validateSchedule(cars, bays, 14, start).feasible);
+  const power = calculatePowerAllocation(
+    cars,
+    bays,
+    14,
+    'demand_urgency',
+    start,
+  );
+  near(power.get('A')!, 7);
+  near(power.get('B')!, 7);
+  near(power.get('C')!, 0);
+  near(power.get('D')!, 0);
+  const after = advanceEngine(state(cars, bays), 60, 14, 'demand_urgency');
+  near(after.sessions[2].allocatedKw, 7);
+  near(after.sessions[3].allocatedKw, 7);
+  const done = advanceEngine(after, 240, 14, 'demand_urgency');
+  done.sessions.forEach((s) => {
+    near(s.deliveredKwh, 7);
+    assert.ok(
+      Date.parse(s.targetReachedAt!) <= Date.parse(s.chargingDeadline!),
+    );
+  });
+});
+
+test('slack allocation protects future tight bookings while sharing power with flexible connected vehicles', () => {
+  const cars = [
+    car('A', 7, 180),
+    car('B', 7, 180),
+    car('C', 7, 120, 60),
+    car('D', 7, 120, 60),
+  ];
+  cars.slice(2).forEach((s) => {
+    s.bayId = null;
+    s.status = 'waiting_bay';
+  });
+  const bays = hardware(['A', 'B', 'C', 'D']);
+  assert.ok(validateSchedule(cars, bays, 14, start).feasible);
+  const done = advanceEngine(state(cars, bays), 180, 14, 'demand_urgency', {
+    managed: true,
+    assumptions: DEFAULT_ASSUMPTIONS,
+  });
+  done.sessions.forEach((s) => {
+    near(s.deliveredKwh, 7);
+    assert.ok(
+      Date.parse(s.targetReachedAt!) <= Date.parse(s.chargingDeadline!),
+    );
+  });
+});
+
+test('late penalties start at agreed move-by, not completion, and unused reservations incur none', () => {
+  const s = car('A', 7, 75);
+  s.status = 'target_reached';
+  s.deliveredKwh = 7;
+  s.targetReachedAt = at(60);
+  near(bookingPenalty(s, at(60), DEFAULT_PENALTY_POLICY).penaltyAmount, 0);
+  near(bookingPenalty(s, at(75), DEFAULT_PENALTY_POLICY).penaltyAmount, 0);
+  const late = bookingPenalty(s, at(87), DEFAULT_PENALTY_POLICY);
+  near(late.lateMinutes, 12);
+  near(late.penaltyAmount, 6);
+  assert.equal(late.penaltyStatus, 'accruing');
+  const stopped = { ...s, status: 'cancelled' as const };
+  near(
+    bookingPenalty(stopped, at(87), DEFAULT_PENALTY_POLICY).penaltyAmount,
+    6,
+  );
+  const reserved = {
+    ...s,
+    status: 'waiting_plugin' as const,
+    pluggedInAt: null,
+    moveReportedAt: null,
+  };
+  near(
+    bookingPenalty(reserved, at(87), DEFAULT_PENALTY_POLICY).penaltyAmount,
+    0,
+  );
+  const grace = bookingPenalty(s, at(87), {
+    ratePerMinute: 0.5,
+    graceMinutes: 10,
+  });
+  near(grace.penaltyAmount, 1);
+});
+
+test('completed overdue occupant blocks an arrived booking until reception confirms vacancy; penalties freeze to the confirmed move time', async () => {
+  const h = await mount(false, false, true);
+  const a = {
+    ...car('A', 7, 90),
+    guestName: 'Sarah Jenkins',
+    roomNumber: '101',
+    bayId: 'bay-1',
+  };
+  const b = {
+    ...car('B', 7, 300, 80),
+    guestName: 'Emma Watson',
+    roomNumber: '102',
+    bayId: null,
+    status: 'waiting_bay' as const,
+  };
+  const preset = {
+    ...emptyPreset,
+    id: 'turnover-penalty-test',
+    bayCount: 1,
+    sitePowerBudgetKw: 7,
+    sessions: [a, b],
+  };
+  ALL_PRESETS.push(preset);
+  try {
+    await h.act(() => h.api.loadPreset(preset.id));
+    await h.act(() => h.api.stepMinutes(60));
+    assert.equal(
+      h.api.sessions.find((s) => s.requestId === 'A')!.status,
+      'target_reached',
+    );
+    assert.equal(h.api.bays[0].currentRequestId, 'A');
+    near(h.api.sessions[0].penalty!.penaltyAmount, 0);
+    await h.act(() => h.api.stepMinutes(42));
+    const blocked = h.api.sessions.find((s) => s.requestId === 'B')!;
+    assert.equal(blocked.bayId, null);
+    assert.equal(blocked.status, 'waiting_bay');
+    near(blocked.deliveredKwh, 0);
+    near(
+      h.api.sessions.find((s) => s.requestId === 'A')!.penalty!.lateMinutes,
+      12,
+    );
+    near(
+      h.api.sessions.find((s) => s.requestId === 'A')!.penalty!.penaltyAmount,
+      6,
+    );
+    const bayCard = h.renderer.root.findAllByType(BayCard)[0];
+    const bayText = JSON.stringify(
+      bayCard.findAllByType('p').map((n) => n.children),
+    );
+    assert.ok(bayText.includes('Charging completion:'));
+    assert.ok(bayText.includes('Current accumulated penalty:'));
+    assert.ok(bayText.includes('6.00'));
+    assert.ok(bayText.includes('12.0 min'));
+    const row = h.renderer.root.findByProps({ 'data-penalty-request': 'A' });
+    assert.ok(
+      row
+        .findAllByType('td')
+        .some((n) => n.children.join('').includes('$6.00')),
+    );
+    assert.ok(
+      h.renderer.root
+        .findAllByType('p')
+        .some(
+          (n) =>
+            n.children.join('').includes('Sarah Jenkins') &&
+            n.children.join('').includes('still occupying bay'),
+        ),
+    );
+    await h.act(() => h.api.reportVehicleMoved('A'));
+    assert.equal(h.api.bays[0].currentRequestId, 'A');
+    assert.equal(h.api.sessions.find((s) => s.requestId === 'B')!.bayId, null);
+    await h.act(() => h.api.stepMinutes(3));
+    near(
+      h.api.sessions.find((s) => s.requestId === 'A')!.penalty!.penaltyAmount,
+      7.5,
+    );
+    await h.act(() => h.api.confirmBayReleased('bay-1'));
+    const final = h.api.historyRecords.find((r) => r.requestId === 'A')!;
+    assert.equal(final.penalty.actualMoveOutTime, at(102));
+    assert.equal(final.penalty.penaltyStatus, 'final');
+    near(final.penalty.penaltyAmount, 6);
+    near(final.simulatedFeeCharged, 6);
+    near(final.overstayMinutes, 12);
+    assert.equal(final.guestName, 'Sarah Jenkins');
+    assert.equal(h.api.bays[0].currentRequestId, 'B');
+    assert.equal(
+      h.api.sessions.find((s) => s.requestId === 'B')!.status,
+      'waiting_plugin',
+    );
+    near(h.api.sessions.find((s) => s.requestId === 'B')!.allocatedKw, 0);
+    await h.act(() =>
+      assert.ok(h.api.confirmVehicleParkedAndPlugged('bay-1', 'B').success),
+    );
+    near(h.api.sessions.find((s) => s.requestId === 'B')!.allocatedKw, 7);
+    await h.act(() => h.api.stepMinutes(60));
+    near(h.api.sessions.find((s) => s.requestId === 'B')!.deliveredKwh, 7);
+    near(h.api.historyRecords[0].penalty.penaltyAmount, 6);
+    await h.act(() =>
+      assert.ok(
+        h.api.setPenaltyPolicy({ ratePerMinute: 2, graceMinutes: 0 }).success,
+      ),
+    );
+    near(h.api.historyRecords[0].penalty.penaltyAmount, 6);
+    assert.ok(
+      h.renderer.root
+        .findByProps({ 'data-penalty-request': 'A' })
+        .findAllByType('td')
+        .some((n) => n.children.join('').includes('Final')),
+    );
+    near(
+      h.api.sessions.find((s) => s.requestId === 'B')!.penalty!.penaltyAmount,
+      0,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test('adaptive slack sharing honors distinct vehicle and charger caps while redistributing the site budget', () => {
+  const cars = [car('A', 7, 300, 0, 11), car('B', 7, 300, 0, 3.6)];
+  const bays = hardware(['A', 'B'], 11);
+  const power = calculatePowerAllocation(
+    cars,
+    bays,
+    14,
+    'demand_urgency',
+    start,
+  );
+  near(power.get('A')!, 10.4);
+  near(power.get('B')!, 3.6);
+  near(
+    [...power.values()].reduce((a, b) => a + b, 0),
+    14,
+  );
+  const done = advanceEngine(state(cars, bays), 300, 14, 'demand_urgency');
+  done.sessions.forEach((s) => {
+    near(s.deliveredKwh, 7);
+    assert.ok(
+      Date.parse(s.targetReachedAt!) <= Date.parse(s.chargingDeadline!),
+    );
+  });
 });

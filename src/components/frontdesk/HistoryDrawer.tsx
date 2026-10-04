@@ -145,6 +145,15 @@ export const HistoryDrawer: React.FC = () => {
                               : 'Not completed'}
                           </p>
                         )}
+                        <p>
+                          Final late-move penalty: $
+                          {record.penalty.penaltyAmount.toFixed(2)} NZD ·{' '}
+                          {record.penalty.lateMinutes.toFixed(1)} minutes late
+                        </p>
+                        <p>
+                          {record.penalty.penaltyReason ||
+                            'No late-move penalty'}
+                        </p>
                         <p>{record.notes}</p>
                       </div>
                     </details>

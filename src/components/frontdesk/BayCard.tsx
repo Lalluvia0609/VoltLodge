@@ -2,7 +2,7 @@ import { guestLabel, guestDetails } from '../../utils/guestIdentity';
 import React, { useState } from 'react';
 import { Bay } from '../../types';
 import { useSimulation } from '../../context/SimulationContext';
-import { formatTimeOnly, getMinutesDiff } from '../../utils/time';
+import { formatTimeOnly, formatDateTime } from '../../utils/time';
 import { BayReleaseModal } from './BayReleaseModal';
 import {
   Zap,
@@ -30,15 +30,12 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
 
   const currentSession = sessions.find((s) => s.bayId === bay.bayId);
   const isTargetReached = currentSession?.status === 'target_reached';
-  const isOverdue =
-    isTargetReached &&
-    currentSession &&
-    currentTimeIso > currentSession.agreedMoveByTime;
-  const overdueMins =
-    isOverdue && currentSession
-      ? getMinutesDiff(currentSession.agreedMoveByTime, currentTimeIso)
-      : 0;
-
+  const penalty = currentSession?.penalty;
+  const overdueMins = penalty?.lateMinutes || 0;
+  const isOverdue = overdueMins > 0;
+  const nextBooking = sessions
+    .filter((s) => s.status === 'waiting_bay')
+    .sort((a, b) => Date.parse(a.arrivalTime) - Date.parse(b.arrivalTime))[0];
   // Progress
   const progressPercent = currentSession
     ? Math.min(
@@ -78,7 +75,7 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
               </span>
             ) : isOverdue ? (
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/30 animate-pulse">
-                Overdue (+{overdueMins}m)
+                Overdue — awaiting move (+{overdueMins.toFixed(1)}m)
               </span>
             ) : isTargetReached ? (
               <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30">
@@ -159,6 +156,44 @@ export const BayCard: React.FC<BayCardProps> = ({ bay }) => {
               </div>
             </div>
 
+            <div className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs text-slate-300 space-y-1">
+              <p>
+                Charging completion:{' '}
+                {currentSession.targetReachedAt
+                  ? formatDateTime(currentSession.targetReachedAt)
+                  : 'Not completed'}
+              </p>
+              <p>
+                Agreed Move-By:{' '}
+                {formatDateTime(currentSession.agreedMoveByTime)}
+              </p>
+              <p>Current time: {formatDateTime(currentTimeIso)}</p>
+              <p>
+                {isOverdue
+                  ? `Overdue: ${overdueMins.toFixed(1)} min — awaiting move`
+                  : 'Not overdue'}
+              </p>
+              <p>
+                Current accumulated penalty: $
+                {(penalty?.penaltyAmount || 0).toFixed(2)} NZD
+              </p>
+              {nextBooking && (
+                <div className="border-t border-slate-800 pt-2 mt-2">
+                  <p>
+                    Next booking in queue: {guestLabel(nextBooking, sessions)}
+                  </p>
+                  <p>Scheduled: {formatDateTime(nextBooking.arrivalTime)}</p>
+                  <p>
+                    Waiting — bay still{' '}
+                    {bay.currentStatus === 'reserved_entry'
+                      ? 'reserved'
+                      : 'occupied'}{' '}
+                    by {guestLabel(currentSession, sessions)}. Reception must
+                    confirm vacancy before admission.
+                  </p>
+                </div>
+              )}
+            </div>
             {/* Timings */}
             <div className="grid grid-cols-2 gap-2 text-xs pt-1">
               <div className="p-2 bg-slate-950 rounded-lg border border-slate-800/80">
